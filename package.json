@@ -1,0 +1,20 @@
+{
+  "name": "gltf-renamer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "^4.2.0",
+    "@gltf-transform/extensions": "^4.2.0",
+    "meshoptimizer": "^0.24.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0",
+    "vite": "^7.1.0"
+  }
+}

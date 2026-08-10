@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>glTF Renamer — rename nodes, meshes &amp; materials in your browser</title>
+    <meta
+      name="description"
+      content="Free online tool to rename scenes, nodes, meshes, materials, animations and more inside glTF / GLB files. Runs fully in your browser — files never leave your device."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🏷️</text></svg>"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header class="site-header">
+        <h1>glTF <span>Renamer</span></h1>
+        <p class="tagline">
+          Rename scenes, nodes, meshes, materials, animations &amp; more inside
+          <code>.glb</code> / <code>.gltf</code> files — entirely in your browser.
+          Your files never leave your device.
+        </p>
+      </header>
+
+      <main>
+        <section id="drop-section">
+          <div id="dropzone">
+            <div class="dropzone-icon" aria-hidden="true">📦</div>
+            <p class="dropzone-title">Drop a <strong>.glb</strong> or <strong>.gltf</strong> file here</p>
+            <p class="hint">or</p>
+            <button id="browse-btn" class="btn btn-primary" type="button">Choose file…</button>
+            <p class="hint">
+              Using a <code>.gltf</code> with external <code>.bin</code> / textures?
+              Drop or select them all together.
+            </p>
+            <input
+              type="file"
+              id="file-input"
+              multiple
+              accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2"
+              hidden
+            />
+          </div>
+          <div id="error-banner" role="alert" hidden></div>
+        </section>
+
+        <section id="editor" hidden>
+          <div class="file-bar">
+            <div class="file-info">
+              <span id="file-name"></span>
+              <span id="file-stats"></span>
+            </div>
+            <div class="file-actions">
+              <button id="reset-btn" class="btn" type="button">Reset names</button>
+              <button id="close-btn" class="btn" type="button">Close</button>
+              <button id="export-btn" class="btn btn-primary" type="button">Download .glb</button>
+            </div>
+          </div>
+
+          <p id="gltf-note" class="note" hidden>
+            Loaded from <code>.gltf</code> — the edited file will be exported as a single
+            self-contained <code>.glb</code>.
+          </p>
+
+          <div class="tools">
+            <input id="search-input" type="search" placeholder="Filter names…" aria-label="Filter names" />
+            <div class="replace-group">
+              <input id="find-input" type="text" placeholder="Find" aria-label="Find" />
+              <input id="replace-input" type="text" placeholder="Replace with" aria-label="Replace with" />
+              <label class="checkbox" title="Treat the Find field as a regular expression">
+                <input type="checkbox" id="regex-toggle" /> regex
+              </label>
+              <button id="replace-btn" class="btn" type="button">Replace all</button>
+            </div>
+          </div>
+
+          <p class="status-row">
+            <span id="status-line"></span>
+            <span id="flash"></span>
+          </p>
+
+          <div id="sections"></div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p>
+          Free &amp; open source. Everything is processed locally — nothing is uploaded.
+          <a href="https://github.com/ilya-nuhi/gltf-renamer" target="_blank" rel="noopener">GitHub</a>
+        </p>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
