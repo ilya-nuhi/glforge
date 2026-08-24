@@ -3,95 +3,265 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>glTF Renamer — rename nodes, meshes &amp; materials in your browser</title>
+    <title>Sceneforge — rename glTF / GLB nodes, meshes &amp; materials</title>
     <meta
       name="description"
-      content="Free online tool to rename scenes, nodes, meshes, materials, animations and more inside glTF / GLB files. Runs fully in your browser — files never leave your device."
+      content="Free online tool to rename scenes, nodes, meshes, materials, animations and more inside glTF / GLB files, with a 3D preview that shows which name belongs to which object. Runs fully in your browser — files never leave your device."
     />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🏷️</text></svg>"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🔨</text></svg>"
     />
   </head>
   <body>
-    <div id="app">
-      <header class="site-header">
-        <h1>glTF <span>Renamer</span></h1>
-        <p class="tagline">
-          Rename scenes, nodes, meshes, materials, animations &amp; more inside
-          <code>.glb</code> / <code>.gltf</code> files — entirely in your browser.
-          Your files never leave your device.
-        </p>
-      </header>
+    <!-- Menubar ---------------------------------------------------------- -->
+    <div id="menubar">
+      <div class="menu brand">
+        <h1 class="title">Scene<span>forge</span></h1>
+      </div>
 
-      <main>
-        <section id="drop-section">
-          <div id="dropzone">
-            <div class="dropzone-icon" aria-hidden="true">📦</div>
-            <p class="dropzone-title">Drop a <strong>.glb</strong> or <strong>.gltf</strong> file here</p>
-            <p class="hint">or</p>
-            <button id="browse-btn" class="btn btn-primary" type="button">Choose file…</button>
-            <p class="hint">
-              Using a <code>.gltf</code> with external <code>.bin</code> / textures?
-              Drop or select them all together.
-            </p>
+      <div class="menu">
+        <div class="title">File</div>
+        <div class="options">
+          <div class="option" data-action="open">Open file…</div>
+          <div class="option" data-action="open-folder">Open folder…</div>
+          <hr />
+          <div class="option" data-action="download">Download<span class="key">Ctrl+S</span></div>
+          <div class="option" data-action="reset">Reset names</div>
+          <hr />
+          <div class="option" data-action="close">Close</div>
+        </div>
+      </div>
+
+      <div class="menu">
+        <div class="title">Edit</div>
+        <div class="options">
+          <div class="option" data-action="undo">Undo replace<span class="key">Ctrl+Z</span></div>
+          <hr />
+          <div class="option" data-action="find">Find &amp; replace…</div>
+          <div class="option" data-action="filter">Filter names…</div>
+        </div>
+      </div>
+
+      <div class="menu">
+        <div class="title">View</div>
+        <div class="options">
+          <div class="option toggle toggle-on" data-action="grid">Grid</div>
+          <div class="option toggle toggle-on" data-action="gizmo">Transform gizmo</div>
+          <hr />
+          <div class="option toggle toggle-on" data-action="mode-translate">
+            Move<span class="key">W</span>
+          </div>
+          <div class="option toggle" data-action="mode-rotate">Rotate<span class="key">E</span></div>
+          <div class="option toggle" data-action="mode-scale">Scale<span class="key">R</span></div>
+          <div class="option toggle" data-action="space">Local axes</div>
+          <hr />
+          <div class="option" data-action="frame">Frame all<span class="key">F</span></div>
+          <div class="option" data-action="isolate">Isolate selection</div>
+          <div class="option" data-action="show-all">Show all</div>
+          <hr />
+          <div class="option" data-action="collapse">Collapse all</div>
+        </div>
+      </div>
+
+      <div class="menu">
+        <div class="title">Help</div>
+        <div class="options">
+          <div class="option" data-action="about">About</div>
+          <div class="option" data-action="source">Source code</div>
+        </div>
+      </div>
+
+      <div class="menu right">
+        <div class="title" id="menubar-file">No file open</div>
+      </div>
+    </div>
+
+    <!-- Viewport --------------------------------------------------------- -->
+    <div id="viewport">
+      <div id="dropzone">
+        <div class="dropzone-inner">
+          <div class="dropzone-icon" aria-hidden="true">📦</div>
+          <p class="dropzone-title">
+            Drop a <strong>.glb</strong>, a <strong>.gltf</strong>, or its whole folder here
+          </p>
+          <p class="dropzone-text">
+            Rename scenes, nodes, meshes, materials, animations &amp; more inside
+            <code>.glb</code> / <code>.gltf</code> files, and wire textures into material
+            slots — entirely in your browser. Your files never leave your device.
+          </p>
+          <p class="dropzone-buttons">
+            <button id="browse-btn" class="Button primary" type="button">Choose file…</button>
+            <button id="browse-folder-btn" class="Button" type="button">Choose folder…</button>
+          </p>
+          <p class="dropzone-hint">
+            Drop the folder to bring the <code>.bin</code> and textures along, so the
+            preview shows the model exactly as it is.
+          </p>
+        </div>
+      </div>
+
+      <div id="viewer-overlay" hidden>
+        <p id="viewer-message"></p>
+        <div id="viewer-actions" hidden>
+          <button id="add-files-btn" class="Button" type="button">Add files…</button>
+          <button id="add-folder-btn" class="Button" type="button">Add folder…</button>
+        </div>
+        <ul id="missing-list" hidden></ul>
+      </div>
+
+      <div id="viewport-info" class="Text" hidden></div>
+      <div id="error-banner" role="alert" hidden></div>
+      <div id="flash" role="status" aria-live="polite" hidden></div>
+    </div>
+
+    <div id="toolbar" hidden>
+      <button
+        id="move-btn"
+        class="Button selected"
+        type="button"
+        aria-pressed="true"
+        title="Move the selected node (W)"
+      >
+        Move
+      </button>
+      <button id="rotate-btn" class="Button" type="button" aria-pressed="false" title="Rotate the selected node (E)">
+        Rotate
+      </button>
+      <button id="scale-btn" class="Button" type="button" aria-pressed="false" title="Scale the selected node (R)">
+        Scale
+      </button>
+      <button id="space-btn" class="Button" type="button" title="Drag along world or local axes">
+        World
+      </button>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <button id="frame-btn" class="Button" type="button" title="Frame everything (F)">Frame</button>
+      <button id="isolate-btn" class="Button" type="button" title="Show only the selection" hidden>
+        Isolate
+      </button>
+      <button id="show-all-btn" class="Button" type="button" hidden>Show all</button>
+      <button
+        id="grid-btn"
+        class="Button selected"
+        type="button"
+        aria-pressed="true"
+        title="Toggle the ground grid"
+      >
+        Grid
+      </button>
+    </div>
+
+    <div id="resizer"></div>
+
+    <!-- Sidebar ---------------------------------------------------------- -->
+    <div id="sidebar">
+      <div id="tabs" role="tablist">
+        <span data-tab="scene" class="selected" role="tab" tabindex="0">Scene</span>
+        <span data-tab="names" role="tab" tabindex="0">Names</span>
+        <span data-tab="tools" role="tab" tabindex="0">Tools</span>
+      </div>
+
+      <div id="tab-scene" class="tab-panel" role="tabpanel">
+        <div class="Panel">
+          <div class="Row" id="scene-row" hidden>
+            <span class="Label">Scene</span>
+            <select id="scene-select" class="Select" aria-label="Scene to preview"></select>
+          </div>
+          <div class="Row">
+            <span class="Label">Filter</span>
             <input
-              type="file"
-              id="file-input"
-              multiple
-              accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2"
-              hidden
+              id="search-input"
+              class="Input"
+              type="search"
+              placeholder="Name…"
+              aria-label="Filter names"
             />
           </div>
-          <div id="error-banner" role="alert" hidden></div>
-        </section>
+        </div>
 
-        <section id="editor" hidden>
-          <div class="file-bar">
-            <div class="file-info">
-              <span id="file-name"></span>
-              <span id="file-stats"></span>
-            </div>
-            <div class="file-actions">
-              <button id="reset-btn" class="btn" type="button">Reset names</button>
-              <button id="close-btn" class="btn" type="button">Close</button>
-              <button id="export-btn" class="btn btn-primary" type="button">Download .glb</button>
-            </div>
+        <div id="outliner" class="Outliner"></div>
+
+        <div id="properties" class="TabbedPanel"></div>
+      </div>
+
+      <div id="tab-names" class="tab-panel" role="tabpanel" hidden>
+        <div id="names-list"></div>
+      </div>
+
+      <div id="tab-tools" class="tab-panel" role="tabpanel" hidden>
+        <div class="Panel">
+          <h2 class="PanelTitle">Find &amp; replace</h2>
+          <div class="Row">
+            <span class="Label">Find</span>
+            <input id="find-input" class="Input" type="text" aria-label="Find" />
           </div>
+          <div class="Row">
+            <span class="Label">Replace</span>
+            <input id="replace-input" class="Input" type="text" aria-label="Replace with" />
+          </div>
+          <div class="Row">
+            <label class="Label" for="regex-toggle">Regex</label>
+            <input type="checkbox" id="regex-toggle" />
+          </div>
+          <div class="Row">
+            <span class="Label"></span>
+            <button id="replace-btn" class="Button" type="button">Replace all</button>
+          </div>
+          <p class="note">
+            Applies to the names left by the current filter. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes it.
+          </p>
+        </div>
 
+        <div class="Panel">
+          <h2 class="PanelTitle">File</h2>
+          <div class="Row">
+            <span class="Label">Name</span>
+            <span id="file-name" class="Value">—</span>
+          </div>
+          <div class="Row">
+            <span class="Label">Contents</span>
+            <span id="file-stats" class="Value">—</span>
+          </div>
+          <div class="Row">
+            <span class="Label"></span>
+            <span class="Buttons">
+              <button id="export-btn" class="Button primary" type="button">Download</button>
+              <button id="reset-btn" class="Button" type="button">Reset names</button>
+              <button id="close-btn" class="Button" type="button">Close</button>
+            </span>
+          </div>
           <p id="gltf-note" class="note" hidden>
-            Loaded from <code>.gltf</code> — the edited file will be exported as a single
-            self-contained <code>.glb</code>.
+            External references (<code>.bin</code> / textures) are kept as-is — the exported
+            <code>.gltf</code> drops right back into your project next to your existing files.
           </p>
-
-          <div class="tools">
-            <input id="search-input" type="search" placeholder="Filter names…" aria-label="Filter names" />
-            <div class="replace-group">
-              <input id="find-input" type="text" placeholder="Find" aria-label="Find" />
-              <input id="replace-input" type="text" placeholder="Replace with" aria-label="Replace with" />
-              <label class="checkbox" title="Treat the Find field as a regular expression">
-                <input type="checkbox" id="regex-toggle" /> regex
-              </label>
-              <button id="replace-btn" class="btn" type="button">Replace all</button>
-            </div>
-          </div>
-
-          <p class="status-row">
-            <span id="status-line"></span>
-            <span id="flash"></span>
+          <p class="note">
+            Renaming is safe for animations, skinning and materials: glTF links those by index,
+            never by name.
           </p>
+          <p class="note">
+            This file and your changes are kept in this browser, so a reload picks up where you
+            left off. Nothing is uploaded; <strong>Close</strong> clears it.
+          </p>
+        </div>
 
-          <div id="sections"></div>
-        </section>
-      </main>
-
-      <footer class="site-footer">
-        <p>
-          Free &amp; open source. Everything is processed locally — nothing is uploaded.
-          <a href="https://github.com/ilya-nuhi/gltf-renamer" target="_blank" rel="noopener">GitHub</a>
-        </p>
-      </footer>
+        <div class="Panel">
+          <h2 class="PanelTitle">About</h2>
+          <p class="note">
+            Free &amp; open source. Everything is processed locally — nothing is uploaded.
+            <a href="https://github.com/ilya-nuhi/sceneforge" target="_blank" rel="noopener">
+              GitHub
+            </a>
+          </p>
+        </div>
+      </div>
     </div>
+
+    <input type="file" id="file-input" accept=".glb,.gltf" hidden />
+    <input type="file" id="folder-input" webkitdirectory multiple hidden />
+    <input type="file" id="image-input" accept="image/*,.ktx2" hidden />
+    <input type="file" id="resource-input" multiple hidden />
+    <input type="file" id="resource-folder-input" webkitdirectory multiple hidden />
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

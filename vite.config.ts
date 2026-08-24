@@ -1,6 +1,13 @@
 import { defineConfig } from 'vite';
 
-// Served from https://<user>.github.io/gltf-renamer/ — base must match the repo name.
+// Served from https://<user>.github.io/sceneforge/ — base must match the repo name.
 export default defineConfig({
-  base: '/gltf-renamer/',
+  base: '/sceneforge/',
+  server: {
+    port: 5180,
+  },
+  build: {
+    // three.js is a deliberate lazy chunk; it never blocks first paint.
+    chunkSizeWarningLimit: 800,
+  },
 });
