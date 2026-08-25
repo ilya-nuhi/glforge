@@ -19,10 +19,15 @@ export type IconName =
   | 'animation'
   | 'skin'
   | 'variant'
+  | 'folder'
+  | 'fileModel'
+  | 'fileData'
+  | 'file'
   | 'eye'
   | 'eyeOff'
   | 'locate'
   | 'revert'
+  | 'remove'
   | 'chevron';
 
 const PATHS: Record<IconName, string> = {
@@ -53,11 +58,21 @@ const PATHS: Record<IconName, string> = {
   skin:
     '<path d="M8 6v12M16 6v12"/><circle cx="8" cy="4.6" r="1.8"/><circle cx="16" cy="4.6" r="1.8"/><circle cx="8" cy="19.4" r="1.8"/><circle cx="16" cy="19.4" r="1.8"/>',
   variant: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
+  // A folder and three file kinds, for the folder the model was opened from.
+  folder: '<path d="M3 6.5h6l2 2.5h10v10.5H3z"/>',
+  // A file with the isometric cube of a mesh node on it: the model itself.
+  fileModel:
+    '<path d="M5 3.5h8l6 6v11H5z"/><path d="M12.2 9.6l4.1 2.3v4.6l-4.1 2.3-4.1-2.3v-4.6z"/>',
+  // A file of raw data: the .bin a glTF keeps its geometry in.
+  fileData:
+    '<path d="M5 3.5h8l6 6v11H5z"/><path d="M8.5 12.5h7M8.5 15.5h7M8.5 18h4"/>',
+  file: '<path d="M5 3.5h8l6 6v11H5z"/><path d="M13 3.5V10h6"/>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff:
     '<path d="M17.9 17.9A10.1 10.1 0 0 1 12 20C5 20 1 12 1 12a18.5 18.5 0 0 1 5.1-6M9.9 4.2A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2m-6.7-1.1a3 3 0 1 1-4.2-4.2"/><path d="M2 2l20 20"/>',
   locate: '<circle cx="12" cy="12" r="7.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/>',
   revert: '<path d="M3 8V3M3 8h5"/><path d="M3.5 14a8.5 8.5 0 1 0 2-8.5L3 8"/>',
+  remove: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   chevron: '<path d="M9.5 6.5l6 5.5-6 5.5"/>',
 };
 

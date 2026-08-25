@@ -1,7 +1,9 @@
 /**
- * Builds a Blender-outliner-style hierarchy from the glTF JSON: objects nested
- * by parent, each object's mesh data nested under it, and each mesh's materials
- * nested under that.
+ * Builds a Blender-outliner-style hierarchy from the glTF JSON: one row per
+ * object, nested by parent. What an object draws is not split off into rows of
+ * its own — like the three.js editor's outliner, the row names its mesh data and
+ * that mesh's materials after the object's own name, and their properties live
+ * in the panel on the right.
  *
  * The list is flat with a `depth` on every item — collapsing is then a matter
  * of hiding the following run of deeper rows, which is far cheaper than nested
@@ -20,8 +22,37 @@ export interface TreeItem {
   hasChildren: boolean;
   /** Present when the row maps to something in the 3D scene. */
   target?: { kind: TargetKind; index: number };
+  /** The mesh data the object draws, printed beside it rather than under it. */
+  mesh?: EntryUse;
+  /** Materials the row uses, printed beside it rather than nested under it. */
+  materials?: EntryUse[];
   /** Heading to print above this item, starting a trailing group. */
   groupNote?: string;
+}
+
+/**
+ * Something a row names beside itself — its mesh data, or one of that mesh's
+ * materials. Kept as the entry, not just an index, so a rename anywhere else
+ * repaints it.
+ */
+export interface EntryUse {
+  entry: NamedEntry;
+  index: number;
+}
+
+/**
+ * The distinct materials a mesh's primitives use, in the order they appear. A
+ * mesh names these beside itself in the outliner, and the properties panel picks
+ * between them, so both go through this.
+ */
+export function meshMaterials(json: GltfJson | null, meshIndex: number): number[] {
+  const used: number[] = [];
+  for (const primitive of json?.meshes?.[meshIndex]?.primitives ?? []) {
+    if (typeof primitive.material === 'number' && !used.includes(primitive.material)) {
+      used.push(primitive.material);
+    }
+  }
+  return used;
 }
 
 export function buildHierarchy(json: GltfJson, sceneIndex: number): TreeItem[] {
@@ -39,43 +70,16 @@ export function buildHierarchy(json: GltfJson, sceneIndex: number): TreeItem[] {
   const usedMeshes = new Set<number>();
   const usedMaterials = new Set<number>();
 
-  const materialsOf = (meshIndex: number): number[] => {
-    const seen: number[] = [];
-    for (const primitive of meshes[meshIndex]?.primitives ?? []) {
-      if (typeof primitive.material === 'number' && !seen.includes(primitive.material)) {
-        seen.push(primitive.material);
-      }
-    }
-    return seen;
-  };
-
-  const pushMesh = (meshIndex: number, depth: number): void => {
-    const mesh = meshes[meshIndex];
-    if (!mesh) return;
-    usedMeshes.add(meshIndex);
-    const used = materialsOf(meshIndex);
-    items.push({
-      entry: mesh,
-      label: 'Mesh',
-      // A mesh with no material at all reads differently from one that has some.
-      icon: used.length > 0 ? 'meshData' : 'meshDataPlain',
-      depth,
-      hasChildren: used.length > 0,
-      target: { kind: 'mesh', index: meshIndex },
-    });
-    for (const materialIndex of used) {
+  /** The materials a mesh uses, marked as reached so the leftovers skip them. */
+  const usesOf = (meshIndex: number): EntryUse[] => {
+    const uses: EntryUse[] = [];
+    for (const materialIndex of meshMaterials(json, meshIndex)) {
       const material = materials[materialIndex];
       if (!material) continue;
       usedMaterials.add(materialIndex);
-      items.push({
-        entry: material,
-        label: 'Material',
-        icon: 'material',
-        depth: depth + 1,
-        hasChildren: false,
-        target: { kind: 'material', index: materialIndex },
-      });
+      uses.push({ entry: material, index: materialIndex });
     }
+    return uses;
   };
 
   const iconFor = (node: GltfNode, index: number): IconName => {
@@ -93,16 +97,25 @@ export function buildHierarchy(json: GltfJson, sceneIndex: number): TreeItem[] {
     visitedNodes.add(index);
 
     const children = (node.children ?? []).filter((child) => nodes[child] !== undefined);
-    items.push({
+    const item: TreeItem = {
       entry: node,
       label: 'Node',
       icon: iconFor(node, index),
       depth,
-      hasChildren: children.length > 0 || node.mesh !== undefined,
+      // Only real children: what the object draws is named on this row, not
+      // nested under it.
+      hasChildren: children.length > 0,
       target: { kind: 'node', index },
-    });
+    };
 
-    if (node.mesh !== undefined) pushMesh(node.mesh, depth + 1);
+    const mesh = node.mesh === undefined ? undefined : meshes[node.mesh];
+    if (node.mesh !== undefined && mesh) {
+      usedMeshes.add(node.mesh);
+      item.mesh = { entry: mesh, index: node.mesh };
+      item.materials = usesOf(node.mesh);
+    }
+    items.push(item);
+
     for (const child of children) walk(child, depth + 1);
   };
 
@@ -110,29 +123,44 @@ export function buildHierarchy(json: GltfJson, sceneIndex: number): TreeItem[] {
   for (const root of roots) walk(root, 0);
 
   // Everything the displayed scene does not reach still has to be renameable.
+  // Mesh data no object in the scene draws has nowhere else to be named, so it
+  // keeps a row of its own down here.
   const leftovers: TreeItem[] = [];
   nodes.forEach((node, index) => {
     if (visitedNodes.has(index)) return;
-    leftovers.push({
+    const item: TreeItem = {
       entry: node,
       label: 'Node',
       icon: iconFor(node, index),
       depth: 0,
       hasChildren: false,
       target: { kind: 'node', index },
-    });
+    };
+    // An object out here names what it draws just as one in the scene does, so
+    // that mesh does not need a second row below.
+    const mesh = node.mesh === undefined ? undefined : meshes[node.mesh];
+    if (node.mesh !== undefined && mesh) {
+      usedMeshes.add(node.mesh);
+      item.mesh = { entry: mesh, index: node.mesh };
+      item.materials = usesOf(node.mesh);
+    }
+    leftovers.push(item);
   });
   meshes.forEach((mesh, index) => {
     if (usedMeshes.has(index)) return;
+    const uses = usesOf(index);
     leftovers.push({
       entry: mesh,
       label: 'Mesh',
-      icon: materialsOf(index).length > 0 ? 'meshData' : 'meshDataPlain',
+      icon: uses.length > 0 ? 'meshData' : 'meshDataPlain',
       depth: 0,
       hasChildren: false,
       target: { kind: 'mesh', index },
+      materials: uses,
     });
   });
+  // Runs after the mesh pass above, so a material only an unused mesh refers to
+  // is named beside that mesh instead of turning up here as well.
   materials.forEach((material, index) => {
     if (usedMaterials.has(index)) return;
     leftovers.push({

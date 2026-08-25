@@ -1,11 +1,11 @@
-# Sceneforge
+# GlForge
 
-Rename scenes, nodes, meshes, materials, animations & more inside `.glb` / `.gltf`
-files, and wire textures into material slots — entirely in your browser, with a
+Rename the nodes, meshes and materials inside `.glb` / `.gltf` files, move them
+about, and wire textures into material slots — entirely in your browser, with a
 3D preview that shows you which name belongs to which object. Files are processed
 locally and never leave your device.
 
-**Live site:** https://ilya-nuhi.github.io/sceneforge/
+**Live site:** https://ilya-nuhi.github.io/glforge/
 
 ## How it works
 
@@ -28,8 +28,9 @@ a resizable 350px sidebar on the right — drag the divider, double-click it to
 reset. The sidebar has three tabs:
 
 - **Scene** — scene picker, name filter, the outliner, and a properties panel
-- **Names** — the flat, category-by-category list of every name in the file
-- **Tools** — find & replace, file info, download / reset / close
+- **Files** — the folder the model was opened from, and what is missing from it
+- **Tools** — find & replace, file info, download / reset / close (names, or
+  everything)
 
 The viewport's bottom-left read-out counts nodes, meshes, materials and how many
 names have been changed.
@@ -50,10 +51,16 @@ replace.
   page — subfolders and all. **File → Open folder…** does the same from a dialog
 - Sidecars are matched by path, so a `textures/wood.png` in the glTF finds the
   file that sat there, however deep the folder was nested
+- The **Files** tab shows that folder back to you, file by file, previews any
+  image in it on a click, names the references nothing supplied covers, and lets
+  you drop a file back out with `Delete`
 - Move, rotate and scale nodes — by dragging a gizmo in the viewport, or by
   typing exact numbers into the properties panel
 - Edit any name inline — click to pick a row, click its name again to rename —
   with per-name revert and one-click reset
+- **Reset all** puts the whole file back the way it was opened — names,
+  transforms and texture bindings together — and **Reset names** does the names
+  alone. Both are in **File** and on the **Tools** tab
 - Filter names, and find & replace across all of them (plain text or regex),
   with one-level undo
 - The open file and every change to it survive a reload, the way the three.js
@@ -61,29 +68,105 @@ replace.
 
 ### Outliner
 
-The **Scene** tab shows an outliner rooted at the scene, the way the editor's
-does: objects nested under their parents, each object's mesh data nested under
-it, and each mesh's materials under that. Every type has its own icon and colour
-— empty/transform object, mesh object, camera, light, joint/bone, mesh data
-(distinguishing meshes that carry a material from those that don't), material,
-texture, image, animation, skin, material variant.
+The **Scene** tab shows an outliner rooted at the file it came from: the model,
+then its objects — nested under their parents, one row per object. There is no
+row for the scene itself: which scene is on show is the toolbar's scene picker,
+and repeating it as a row would only say the same thing twice. Its name is on the
+**Names** tab with the other scenes.
+
+An object is not split from what it draws. Right after its own name comes the
+symbol for the mesh data it draws — the symbol alone, since a mesh almost always
+carries the object's name over again and printing it twice says nothing; its name
+is in the tooltip. Then come that mesh's materials by name, the way the three.js
+editor's outliner prints an object's material after its name. One material is a
+chip; a mesh with several gets a dropdown saying how many. Picking any of them
+selects it and fills the properties panel with it, hovering one outlines it in
+the viewport, and a rename anywhere repaints it here. Mesh data no object in the
+file draws still gets a row of its own, under the leftovers below.
+
+Every type has its own icon and colour — empty/transform object, mesh object,
+camera, light, joint/bone, mesh data (distinguishing meshes that carry a material
+from those that don't), material, texture, image, animation, skin, material
+variant. The model row is the file on disk rather than anything in the document,
+so it is a heading: it collapses the whole tree, and it is the one row with no
+name to edit.
 
 Rows collapse and expand, and anything the current scene doesn't reach is listed
 below a "Not used in this scene" heading so it stays renameable. The same mesh or
 material can appear in several places; editing one row updates them all, and
-find & replace applies once per entry rather than once per row.
+find & replace applies once per entry rather than once per row. The filter
+searches what a row names as well as the row itself, so a material still turns up
+its meshes.
 
-The **Names** tab lists everything flat, category by category — including the
-types the outliner does not nest (scenes, skins, textures, images, animations,
-cameras, lights, material variants).
+**Material names stay unique.** Downstream of the file a material is usually
+looked up by name, so a name another material already answers to is refused: the
+field turns red, the document keeps the name it had, and leaving the field puts
+it back with a note saying why. Find & replace obeys the same rule — the renames
+that would collide are left alone and counted in the message. Names are compared
+exactly, since two names differing in case are two names.
+
+**What the outliner covers is objects, their mesh data and their materials** —
+including anything the current scene does not use, which is why the leftovers are
+listed rather than dropped. Everything else a glTF can name (scenes, skins,
+textures, images, animations, cameras, lights, material variants) is on the
+**Names** tab, which is a row like any other: renameable, filtered, and reached
+by find & replace. **Reset all** puts every one of them back, since it re-reads
+the original file rather than walking rows.
+
+### Files
+
+The **Files** tab is the folder the model came from, as a tree: the `.glb` /
+`.gltf` itself and every file dropped alongside it, in the subfolders they sat
+in. Folders collapse, and each row carries its size — a folder carries its whole
+subtree's.
+
+What each file is *for* is the point of the list. Its glyph and tooltip say
+whether the document reaches for it as geometry data or as a texture image, and
+which URI it is standing in for. Files nothing refers to are marked **unused**
+rather than hidden — a texture the exporter left behind, or a `.bin` for the
+variant next to the one you opened. Images you brought in through **Add image…**
+are marked **added**, since they are not part of the file until you download it.
+
+Click a `.png`, `.jpg`, `.webp`, `.gif`, `.bmp` or `.avif` and it opens under
+the tree at something like full size, on a checkerboard so alpha reads as alpha,
+with its pixel dimensions beside its byte size. It is drawn straight from the
+bytes on your disk, so an image nothing is bound to yet previews just as well as
+one in use — which is the quickest way to find out which of five near-identical
+`normal` maps is the one you want. Clicking it again puts it away. Compressed
+containers (`.ktx2`, `.basis`, `.dds`) are listed but say plainly that a browser
+will not decode them.
+
+`Delete` removes the row the keyboard is on, and every row has an **×** on hover
+that does the same. On a folder it removes everything below it, and the count
+says how many. This only makes the app forget the file — **nothing on your disk
+is touched** — so a URI it was covering moves straight to **Not supplied**, and
+dropping the file back in undoes it completely. The `.glb` / `.gltf` itself is
+not removable, since that is what **File → Close** is for. `↑`/`↓` walk the rows
+and `←`/`→` close and open folders, as they do in the outliner.
+
+Below the tree, **Not supplied** lists the references that found no file: the
+`.bin` in red, because the preview cannot draw anything without it, and textures
+in grey, because those only cost you a placeholder. **Add files… / Add folder…**
+supply them without leaving the tab, and the list shortens as they arrive.
+
+A `.glb` carries its data and textures inside it, so it normally shows up alone —
+which is itself worth seeing.
 
 ### Properties
 
-Selecting something fills the properties panel under the outliner, tabbed
-**node / mesh / material** the way the editor tabs object / geometry / material.
+Selecting something fills the properties panel under the outliner, and the panel
+describes exactly what was picked: a node is a node, so its tab is the only one —
+the mesh it draws is named beside it in the outliner, and a **Mesh** link in the
+panel jumps to it. Picking that mesh tabs **mesh / material**, the way the editor
+tabs geometry and material.
 Each tab renames its own entry and shows its index, plus type and child count
 for a node, primitive count for a mesh, alpha mode and double-sidedness for a
 material — with a visibility checkbox and Frame / Isolate buttons.
+
+A mesh with several materials repeats the outliner's dropdown at the top of its
+**material** tab, so which one you are editing is a choice you can make from
+either end — and picking one in the outliner shows it in the panel, and the other
+way round.
 
 ### Transform
 
@@ -103,6 +186,13 @@ representation: a node that stated a matrix gets its matrix back. Until it is
 moved, that is: the panel decomposes a matrix for display, and the first edit
 writes plain TRS and drops the matrix, since a node cannot legally carry both.
 Putting every component back by hand clears the "moved" mark on its own.
+
+**Reset all** (**File → Reset all changes**, or the Tools tab) does that for the
+whole file at once, and for every other kind of edit with it: every name, every
+moved node, every texture binding, and any image added along the way. It re-reads
+the bytes the file was opened with, so the result is the file itself again rather
+than an undo history walked backwards — and the preview reloads from those same
+bytes. **Reset names** is still there for the names alone.
 
 Mesh data has no transform of its own — only the nodes using it do — so the mesh
 tab shows where it ended up instead: its **world origin**, its bounding **size**,
@@ -129,11 +219,13 @@ invisible.
 The viewport is always live, and answers "which name is this?":
 
 - Click any object to select it — the matching outliner row is highlighted and
-  scrolled to, and the properties panel gives you its node, mesh and material
+  scrolled to, and the properties panel gives you the node it belongs to, its
+  transform included; its mesh data and material are a click away from there
 - Click a row (or focus its name field) to select it in the viewport
-- Hover a row to outline it in the viewport. Hovering a *node* outlines one
-  object; hovering a *mesh* outlines every instance of it — which is the
-  quickest way to feel the difference between the two
+- Hover a row to outline it in the viewport. Hovering the *object* outlines that
+  one object; hovering the *mesh* named beside it outlines every instance of that
+  mesh, and a *material* outlines everything using it — which is the quickest way
+  to feel the difference between the three
 - Toggle visibility per node or mesh. When something is hidden because its
   parent is hidden, the row says so, and clicking its eye reveals the parent
 - **Isolate** the selection, **Show all**, **Frame** and a grid toggle, from the

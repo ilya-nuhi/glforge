@@ -1,8 +1,8 @@
 import { defineConfig } from 'vite';
 
-// Served from https://<user>.github.io/sceneforge/ — base must match the repo name.
+// Served from https://<user>.github.io/glforge/ — base must match the repo name.
 export default defineConfig({
-  base: '/sceneforge/',
+  base: '/glforge/',
   server: {
     port: 5180,
   },

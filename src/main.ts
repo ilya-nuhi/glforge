@@ -46,6 +46,14 @@ import {
   resolveResource,
 } from './resources';
 import {
+  buildFolderRows,
+  filesUnder,
+  formatBytes,
+  type FileRole,
+  type FolderFile,
+  type FolderRow,
+} from './folder';
+import {
   MAX_SESSION_BYTES,
   clearSession,
   isQuotaError,
@@ -59,7 +67,7 @@ import {
   type Session,
   type SourceRecord,
 } from './session';
-import { buildHierarchy } from './tree';
+import { buildHierarchy, meshMaterials, type EntryUse } from './tree';
 import type {
   CameraView,
   GizmoMode,
@@ -70,51 +78,45 @@ import type {
 } from './viewer';
 import './style.css';
 
+/**
+ * The glTF collections that carry names, for counting what a file holds and for
+ * pairing a restored document against the file's own names. Rows are built from
+ * the scene hierarchy alone, so nothing here needs an icon or a 3D target.
+ */
 interface Category {
   label: string;
   singular: string;
-  icon: IconName;
-  /** What rows in this category map to in the 3D scene, if anything. */
-  kind?: TargetKind;
   list: (json: GltfJson) => NamedEntry[];
 }
 
 const CATEGORIES: Category[] = [
-  { label: 'Scenes', singular: 'Scene', icon: 'scene', list: (j) => j.scenes ?? [] },
-  { label: 'Nodes', singular: 'Node', icon: 'nodeMesh', kind: 'node', list: (j) => j.nodes ?? [] },
-  { label: 'Meshes', singular: 'Mesh', icon: 'meshData', kind: 'mesh', list: (j) => j.meshes ?? [] },
-  { label: 'Skins', singular: 'Skin', icon: 'skin', list: (j) => j.skins ?? [] },
-  {
-    label: 'Materials',
-    singular: 'Material',
-    icon: 'material',
-    kind: 'material',
-    list: (j) => j.materials ?? [],
-  },
-  { label: 'Textures', singular: 'Texture', icon: 'texture', list: (j) => j.textures ?? [] },
-  { label: 'Images', singular: 'Image', icon: 'image', list: (j) => j.images ?? [] },
-  {
-    label: 'Animations',
-    singular: 'Animation',
-    icon: 'animation',
-    list: (j) => j.animations ?? [],
-  },
-  { label: 'Cameras', singular: 'Camera', icon: 'nodeCamera', list: (j) => j.cameras ?? [] },
+  { label: 'Scenes', singular: 'Scene', list: (j) => j.scenes ?? [] },
+  { label: 'Nodes', singular: 'Node', list: (j) => j.nodes ?? [] },
+  { label: 'Meshes', singular: 'Mesh', list: (j) => j.meshes ?? [] },
+  { label: 'Skins', singular: 'Skin', list: (j) => j.skins ?? [] },
+  { label: 'Materials', singular: 'Material', list: (j) => j.materials ?? [] },
+  { label: 'Textures', singular: 'Texture', list: (j) => j.textures ?? [] },
+  { label: 'Images', singular: 'Image', list: (j) => j.images ?? [] },
+  { label: 'Animations', singular: 'Animation', list: (j) => j.animations ?? [] },
+  { label: 'Cameras', singular: 'Camera', list: (j) => j.cameras ?? [] },
   {
     label: 'Lights',
     singular: 'Light',
-    icon: 'nodeLight',
     list: (j) => j.extensions?.KHR_lights_punctual?.lights ?? [],
   },
   {
     label: 'Material variants',
     singular: 'Material variant',
-    icon: 'variant',
     list: (j) => j.extensions?.KHR_materials_variants?.variants ?? [],
   },
 ];
 
-type SidebarTab = 'scene' | 'names' | 'tools';
+type SidebarTab = 'scene' | 'files' | 'tools';
+
+/** A row of the Files tab's tree, paired with the element drawing it. */
+interface FileTreeRow extends FolderRow {
+  el: HTMLLIElement;
+}
 
 interface Row {
   entry: NamedEntry;
@@ -122,6 +124,12 @@ interface Row {
   /** Index within its own glTF collection. */
   index: number;
   target?: { kind: TargetKind; index: number };
+  /** Mesh data named beside the row, if the object draws any. */
+  mesh?: EntryUse;
+  /** Materials named beside the row, matched by the filter along with it. */
+  materials: EntryUse[];
+  /** A row that stands for the file itself: there is no name in it to edit. */
+  fixed: boolean;
   depth: number;
   hasChildren: boolean;
   original: string;
@@ -145,6 +153,30 @@ interface RowSpec {
   depth: number;
   hasChildren: boolean;
   target?: { kind: TargetKind; index: number };
+  /** Mesh data named beside the row, the way the editor's outliner does. */
+  mesh?: EntryUse;
+  /** Materials named beside the row, the way the editor's outliner does. */
+  materials?: EntryUse[];
+  /** The file's own row: shown, walked and framed, but never renamed. */
+  fixed?: boolean;
+}
+
+/**
+ * A material named beside a mesh row — a chip when the mesh has one material, an
+ * option of its dropdown when it has several. Both have to follow a rename and
+ * to say when their material is the selection, so both are described by what
+ * they do rather than by which element they are.
+ */
+interface AsideLabel {
+  /** What it names: the row's mesh data, or one of that mesh's materials. */
+  kind: 'mesh' | 'material';
+  index: number;
+  /** The mesh it belongs to, so only that mesh's labels mark its selection. */
+  mesh: number;
+  /** Repaint after a rename. */
+  paint: (value: string) => void;
+  /** Show whether this material is what is selected. */
+  mark: (selected: boolean) => void;
 }
 
 /** A name field in the properties panel, kept in sync with its row. */
@@ -212,7 +244,16 @@ const resizer = $('#resizer');
 const sidebar = $('#sidebar');
 const tabsEl = $('#tabs');
 const outlinerEl = $('#outliner');
-const namesEl = $('#names-list');
+const fileTreeEl = $('#file-tree');
+const filesSummary = $('#files-summary');
+const filesAddBtn = $('#files-add-btn');
+const filesAddFolderBtn = $('#files-add-folder-btn');
+const missingPanel = $('#missing-panel');
+const missingFilesEl = $<HTMLUListElement>('#missing-files');
+const previewPanel = $('#image-preview-panel');
+const previewHost = $('#image-preview');
+const previewName = $('#preview-name');
+const previewMeta = $('#preview-meta');
 const propertiesEl = $('#properties');
 const searchInput = $<HTMLInputElement>('#search-input');
 const findInput = $<HTMLInputElement>('#find-input');
@@ -220,12 +261,13 @@ const replaceInput = $<HTMLInputElement>('#replace-input');
 const regexToggle = $<HTMLInputElement>('#regex-toggle');
 const replaceBtn = $<HTMLButtonElement>('#replace-btn');
 const resetBtn = $('#reset-btn');
+const resetAllBtn = $('#reset-all-btn');
 const closeBtn = $('#close-btn');
 const exportBtn = $<HTMLButtonElement>('#export-btn');
 const flash = $('#flash');
 
-const SIDEBAR_KEY = 'sceneforge:sidebar-width';
-const GITHUB_URL = 'https://github.com/ilya-nuhi/sceneforge';
+const SIDEBAR_KEY = 'glforge:sidebar-width';
+const GITHUB_URL = 'https://github.com/ilya-nuhi/glforge';
 
 // ---------------------------------------------------------------------------
 // State
@@ -238,11 +280,17 @@ let sourceBuffer: ArrayBuffer | null = null;
 let sourceText: string | null = null;
 let sourceWasPretty = false;
 let exportBaseName = 'model';
+/** Where the model itself sat in what was dropped, for the Files tab. */
+let modelPath = '';
+/** Its size in bytes, or -1 when a restored session did not record one. */
+let modelSize = -1;
 
 let rows: Row[] = [];
 /** One entry can own several rows: a mesh used by two nodes appears twice. */
 let rowsByEntry = new Map<NamedEntry, Row[]>();
 let rowsByTarget = new Map<string, Row[]>();
+/** Material names printed beside mesh rows, keyed by the entry they show. */
+let asideLabels = new Map<NamedEntry, AsideLabel[]>();
 let noteGroups: { el: HTMLElement; rows: Row[] }[] = [];
 let collapsedRows = new Set<number>();
 let allCollapsed = false;
@@ -283,6 +331,13 @@ let reloadPending: ViewerOptions | null = null;
 let sceneIndex = 0;
 let selection: SelectionRef | null = null;
 let resources = new Map<string, File>();
+let fileTreeRows: FileTreeRow[] = [];
+/** Collapsed folders in the Files tab, by path so a rebuild keeps them shut. */
+let collapsedFolders = new Set<string>();
+/** The picked row in the Files tab, by path, so a rebuild keeps it picked. */
+let selectedFilePath: string | null = null;
+/** The image on show under the tree, and the URL drawing it. */
+let previewFile: { path: string; file: File; url: string } | null = null;
 let replaceUndo: { entry: NamedEntry; value: string }[] | null = null;
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
 let gridVisible = true;
@@ -363,6 +418,9 @@ async function openFiles(picked: PickedFile[]): Promise<void> {
 
     sourceIsGlb = isGlb;
     exportBaseName = modelFile.name.replace(/\.(glb|gltf)$/i, '');
+    // The path it was dropped at, so the Files tab can show it where it sat.
+    modelPath = models[0].path;
+    modelSize = modelFile.size;
     gltfNote.hidden = isGlb;
     fileNameEl.textContent = modelFile.name;
     menubarFile.textContent = modelFile.name;
@@ -406,32 +464,86 @@ function setEntryName(entry: NamedEntry, value: string, source?: HTMLInputElemen
   for (const row of siblings) {
     // Never rewrite the input being typed into: it would reset the caret.
     if (row.input !== source) row.input.value = value;
+    // Whatever a field shows now is what the document holds, so nothing about
+    // it is rejected any more.
+    row.input.classList.remove('invalid');
     updateRowState(row);
+    if (row.materials.length > 0) fitNameField(row.input);
   }
   for (const field of propFields) {
     if (field.entry !== entry) continue;
     if (field.input !== source) field.input.value = value;
+    field.input.classList.remove('invalid');
     field.input.classList.toggle('modified', value !== field.original);
   }
+  // A material is named beside every mesh that uses it, not just on a row.
+  for (const label of asideLabels.get(entry) ?? []) label.paint(value);
+}
+
+/**
+ * The other material already carrying this name, if any. Downstream of the file
+ * a material is usually looked up by name, so two of them answering to one name
+ * is a rename the app refuses to make. Comparison is exact: glTF names are, and
+ * two names differing in case are two names.
+ */
+function materialNameClash(entry: NamedEntry, value: string): NamedEntry | null {
+  const materials = gltfJson?.materials;
+  // An unnamed material is not a name being taken, and only materials collide.
+  if (!materials || value === '' || !materials.includes(entry)) return null;
+  return materials.find((other) => other !== entry && getName(other) === value) ?? null;
+}
+
+/**
+ * Writes what was typed into a name field, unless it would give two materials
+ * the same name. A rejected name stays in the field, marked, and never reaches
+ * the document — so the file keeps the name it had while the user fixes theirs.
+ */
+function applyNameEdit(entry: NamedEntry, input: HTMLInputElement): void {
+  const clash = materialNameClash(entry, input.value);
+  if (clash) {
+    input.classList.add('invalid');
+    input.title = `Material ${gltfJson!.materials!.indexOf(clash)} is already named "${input.value}"`;
+    return;
+  }
+  setEntryName(entry, input.value, input);
+  updateFileStats();
+}
+
+/** Leaving a field with a rejected name in it puts the document's name back. */
+function settleNameEdit(entry: NamedEntry, input: HTMLInputElement): void {
+  if (!input.classList.contains('invalid')) return;
+  const kept = getName(entry);
+  const typed = input.value;
+  setEntryName(entry, kept);
+  updateFileStats();
+  showFlash(`"${typed}" is another material's name — kept "${kept || '(unnamed)'}"`);
+}
+
+/** Which entry a name field stands for, wherever in the UI it is. */
+function entryForInput(input: HTMLInputElement): NamedEntry | undefined {
+  for (const row of rows) {
+    if (row.input === input) return row.entry;
+  }
+  return propFields.find((field) => field.input === input)?.entry;
 }
 
 function buildEditor(): void {
   outlinerEl.textContent = '';
-  namesEl.textContent = '';
   rows = [];
   rowsByEntry = new Map();
   rowsByTarget = new Map();
+  asideLabels = new Map();
   noteGroups = [];
   collapsedRows = new Set();
   allCollapsed = false;
   replaceUndo = null;
 
-  // Order matters: hierarchy rows first, so collapsing (which hides the run of
-  // deeper rows that follows) never reaches into the flat lists.
   buildOutliner();
-  for (const category of CATEGORIES) buildFlatSection(category);
 
   updateFileStats();
+  // Added images become files of their own, so the folder view moves with the
+  // document as well as with what has been dropped in.
+  renderFiles();
 
   applyFilter();
   updateStatus();
@@ -445,30 +557,39 @@ function buildEditor(): void {
 
 function buildOutliner(): void {
   const items = buildHierarchy(gltfJson!, sceneIndex);
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'This file has no scene contents.';
+    outlinerEl.append(empty);
+    return;
+  }
+
   const list = document.createElement('ul');
   outlinerEl.append(list);
 
-  // The scene is the outliner's root row, as in the three.js editor.
-  const scene = gltfJson?.scenes?.[sceneIndex];
-  if (scene) {
+  // The file is the outliner's one root: the scene it shows is the scene the
+  // toolbar has selected, so a row for it would only repeat that.
+  const model = baseName(modelPath);
+  if (model !== '') {
     addRow(list, {
-      entry: scene,
-      label: 'Scene',
-      icon: 'scene',
-      index: sceneIndex,
+      entry: { name: model },
+      label: 'Model',
+      icon: 'fileModel',
+      index: 0,
       depth: 0,
-      hasChildren: items.length > 0,
-      });
+      hasChildren: true,
+      fixed: true,
+    });
   }
 
   let currentGroup: { el: HTMLElement; rows: Row[] } | null = null;
-  // Everything the scene reaches hangs off the scene row; the leftovers that
-  // follow the group note belong to no scene, so they stay at the root.
-  let offset = scene ? 1 : 0;
+  // Everything hangs off the file row, the leftovers below the group note
+  // included: they are in the file, just not in this scene.
+  const rootDepth = model === '' ? 0 : 1;
 
   for (const item of items) {
     if (item.groupNote) {
-      offset = 0;
       const note = document.createElement('li');
       note.className = 'group-note';
       note.textContent = item.groupNote;
@@ -481,64 +602,25 @@ function buildOutliner(): void {
       label: item.label,
       icon: item.icon,
       index: item.target?.index ?? 0,
-      depth: item.depth + offset,
+      depth: item.depth + rootDepth,
       hasChildren: item.hasChildren,
       target: item.target,
+      mesh: item.mesh,
+      materials: item.materials,
     });
     currentGroup?.rows.push(row);
   }
-
-  if (rows.length === 0) {
-    outlinerEl.textContent = '';
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    empty.textContent = 'This file has no scene contents.';
-    outlinerEl.append(empty);
-  }
-}
-
-function buildFlatSection(category: Category): void {
-  const entries = category.list(gltfJson!);
-  if (entries.length === 0) return;
-  const { section, list } = createSection(category.label, String(entries.length));
-  entries.forEach((entry, index) => {
-    addRow(list, {
-      entry,
-      label: category.singular,
-      icon: category.icon,
-      index,
-      depth: 0,
-      hasChildren: false,
-      target: category.kind ? { kind: category.kind, index } : undefined,
-    });
-  });
-  namesEl.append(section);
-}
-
-function createSection(title: string, badge: string): { section: HTMLElement; list: HTMLUListElement } {
-  const section = document.createElement('section');
-  section.className = 'category';
-
-  const heading = document.createElement('h2');
-  heading.textContent = title;
-  const count = document.createElement('span');
-  count.className = 'count';
-  count.textContent = badge;
-  heading.append(count);
-
-  const list = document.createElement('ul');
-  section.append(heading, list);
-  return { section, list };
 }
 
 function addRow(list: HTMLUListElement, spec: RowSpec): Row {
   const el = document.createElement('li');
-  el.className = 'row';
+  el.className = spec.fixed ? 'row fixed' : 'row';
   el.dataset.row = String(rows.length);
 
   const indexEl = document.createElement('span');
   indexEl.className = 'row-index';
-  indexEl.textContent = String(spec.index);
+  // The file has no index in the document, so its row shows none.
+  indexEl.textContent = spec.fixed ? '' : String(spec.index);
 
   const main = document.createElement('div');
   main.className = 'row-main';
@@ -566,8 +648,18 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
   input.spellcheck = false;
   // A name is a label until the row is picked a second time; see beginRename.
   input.readOnly = true;
-  input.setAttribute('aria-label', `${spec.label} ${spec.index} name`);
+  input.setAttribute('aria-label', spec.fixed ? spec.label : `${spec.label} ${spec.index} name`);
   main.append(input);
+
+  // Whose materials the row is naming: the mesh it draws, or the mesh it is.
+  const owner = spec.mesh?.index ?? (spec.target?.kind === 'mesh' ? spec.target.index : undefined);
+  if (owner !== undefined && (spec.mesh || (spec.materials?.length ?? 0) > 0)) {
+    // The name field stops where its text does, so what follows sits beside the
+    // name rather than out at the edge of the row.
+    main.classList.add('has-aside');
+    main.append(rowAside(spec.mesh, spec.materials ?? [], owner));
+    fitNameField(input);
+  }
 
   let eyeBtn: HTMLButtonElement | null = null;
   let locateBtn: HTMLButtonElement | null = null;
@@ -614,6 +706,9 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
     label: spec.label,
     index: spec.index,
     target: spec.target,
+    mesh: spec.mesh,
+    materials: spec.materials ?? [],
+    fixed: spec.fixed === true,
     depth: spec.depth,
     hasChildren: spec.hasChildren,
     original: pristine?.name ?? getName(spec.entry),
@@ -628,8 +723,9 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
   };
 
   input.addEventListener('input', () => {
-    setEntryName(row.entry, input.value, input);
-    updateFileStats();
+    applyNameEdit(row.entry, input);
+    // Rejected or not, the field is showing what was typed, so it resizes.
+    if (row.materials.length > 0) fitNameField(input);
   });
   // Reaching a name is a selection: the properties panel and the 3D view follow.
   input.addEventListener('focus', () => {
@@ -639,6 +735,7 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
   // Leaving the field ends the rename, so the row is a row again next time.
   input.addEventListener('blur', () => {
     input.readOnly = true;
+    settleNameEdit(row.entry, input);
   });
 
   // Only a restored row can already differ from the file, so the usual path
@@ -650,13 +747,195 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
   if (siblings) siblings.push(row);
   else rowsByEntry.set(spec.entry, [row]);
 
-  if (spec.target) {
-    const key = targetKey(spec.target.kind, spec.target.index);
-    const targeted = rowsByTarget.get(key);
-    if (targeted) targeted.push(row);
-    else rowsByTarget.set(key, [row]);
-  }
+  if (spec.target) addTargetRow(spec.target.kind, spec.target.index, row);
+  // An object's row stands in for its mesh data as well, since that has no row
+  // of its own: selecting the mesh has to light something up in here.
+  if (spec.mesh) addTargetRow('mesh', spec.mesh.index, row);
   return row;
+}
+
+function addTargetRow(kind: TargetKind, index: number, row: Row): void {
+  const key = targetKey(kind, index);
+  const targeted = rowsByTarget.get(key);
+  if (targeted) targeted.push(row);
+  else rowsByTarget.set(key, [row]);
+}
+
+/**
+ * What a row draws, printed just after its own name the way the three.js
+ * editor's outliner prints an object's geometry and material after its name:
+ * the mesh data, then that mesh's materials. One material is a chip; several are
+ * a dropdown, since a mesh with eight primitives would otherwise bury the name.
+ * Picking any of them shows its properties, which is where mesh data and
+ * materials live now that neither has a row of its own.
+ */
+function rowAside(mesh: EntryUse | undefined, materials: EntryUse[], owner: number): HTMLElement {
+  const aside = document.createElement('span');
+  aside.className = 'row-aside';
+
+  // A row that *is* mesh data — mesh nothing in the file draws — has no chip for
+  // it: the row's own name is the mesh, and it names its materials.
+  if (mesh) aside.append(meshChip(mesh, materials.length > 0));
+  if (materials.length === 1) aside.append(materialChip(materials[0], owner));
+  else if (materials.length > 1) {
+    // The icon is the chip's; a native dropdown cannot carry one in its options.
+    aside.append(typeIcon('material'), materialPicker(materials, owner));
+  }
+  return aside;
+}
+
+/**
+ * That the object draws mesh data, as the symbol for it alone: the mesh usually
+ * carries the object's own name over again, and printing it twice on one row
+ * says nothing. Its name is in the tooltip, and one click away in the panel.
+ */
+function meshChip(use: EntryUse, hasMaterials: boolean): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'row-chip glyph';
+  button.dataset.action = 'select-mesh';
+  button.dataset.mesh = String(use.index);
+  // A mesh with no material at all reads differently from one that has some.
+  button.append(typeIcon(hasMaterials ? 'meshData' : 'meshDataPlain'));
+
+  registerAside(use.entry, {
+    kind: 'mesh',
+    index: use.index,
+    mesh: use.index,
+    paint: (value) => {
+      button.title = `Mesh ${use.index}: ${value || `Mesh ${use.index}`} — show its properties`;
+      button.setAttribute('aria-label', button.title);
+    },
+    mark: (selected) => button.classList.toggle('selected', selected),
+  });
+  return button;
+}
+
+function materialChip(use: EntryUse, mesh: number): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'row-chip';
+  button.dataset.action = 'select-material';
+  button.dataset.material = String(use.index);
+
+  const name = document.createElement('span');
+  name.className = 'row-chip-name';
+  button.append(typeIcon('material'), name);
+
+  registerAside(use.entry, {
+    kind: 'material',
+    index: use.index,
+    mesh,
+    paint: (value) => {
+      name.textContent = materialLabel(value, use.index);
+      name.classList.toggle('unnamed', value === '');
+      button.title = `Material ${use.index}: ${materialLabel(value, use.index)} — show its properties`;
+      button.setAttribute('aria-label', button.title);
+    },
+    mark: (selected) => button.classList.toggle('selected', selected),
+  });
+  return button;
+}
+
+function materialPicker(uses: EntryUse[], mesh: number): HTMLSelectElement {
+  const select = document.createElement('select');
+  select.className = 'row-chip';
+  select.title = `${uses.length} materials — pick one to show its properties`;
+  select.setAttribute('aria-label', select.title);
+
+  // What the closed dropdown says until one is picked: the count is the point.
+  const summary = document.createElement('option');
+  summary.value = '';
+  summary.textContent = `${uses.length} materials`;
+  select.append(summary);
+
+  for (const use of uses) {
+    const option = document.createElement('option');
+    option.value = String(use.index);
+    select.append(option);
+    registerAside(use.entry, {
+      kind: 'material',
+      index: use.index,
+      mesh,
+      paint: (value) => {
+        option.textContent = materialLabel(value, use.index);
+      },
+      // Picked elsewhere — from the panel, say — the dropdown shows it too.
+      mark: (selected) => {
+        if (selected) select.value = option.value;
+        else if (select.value === option.value) select.value = '';
+      },
+    });
+  }
+
+  select.addEventListener('change', () => {
+    if (select.value === '') return;
+    propTab = 'material';
+    selectTarget({ mesh, material: Number(select.value) });
+  });
+  return select;
+}
+
+/** The row font, read from a live field once: every row name field shares it. */
+let rowFont = '';
+let textMeasure: CanvasRenderingContext2D | null = null;
+
+/**
+ * Sizes a name field to its own text. Only rows that print something after the
+ * name need this — everywhere else a field spanning the row is the bigger, and
+ * so the better, target to click.
+ */
+function fitNameField(input: HTMLInputElement): void {
+  if (!textMeasure) textMeasure = document.createElement('canvas').getContext('2d');
+  if (!textMeasure) return;
+  if (rowFont === '') {
+    const style = getComputedStyle(input);
+    // A field built before its stylesheet applies would measure as nothing.
+    if (style.fontSize === '' || style.fontFamily === '') return;
+    rowFont = `${style.fontSize} ${style.fontFamily}`;
+  }
+  textMeasure.font = rowFont;
+  const text = input.value || input.placeholder;
+  // Padding and borders, plus a pixel of slack for the italic placeholder.
+  input.style.width = `${Math.ceil(textMeasure.measureText(text).width) + 13}px`;
+}
+
+function registerAside(entry: NamedEntry, label: AsideLabel): void {
+  label.paint(getName(entry));
+  const labels = asideLabels.get(entry);
+  if (labels) labels.push(label);
+  else asideLabels.set(entry, [label]);
+}
+
+/** An unnamed material still has to be pointed at, so it goes by its index. */
+function materialLabel(value: string, index: number): string {
+  return value || `Material ${index}`;
+}
+
+/**
+ * Marks what the panel is showing among the things named beside rows. Neither
+ * mesh data nor a material has a row of its own to light up, so their chips and
+ * dropdowns are what say where the selection went.
+ */
+function paintAsideSelection(): void {
+  for (const labels of asideLabels.values()) {
+    for (const label of labels) label.mark(asideIsShowing(label));
+  }
+}
+
+/**
+ * Whether a label names what the panel is showing. A mesh and its material are
+ * selected together, so the two chips cannot both be it — which one is lit
+ * follows the tab on show.
+ */
+function asideIsShowing(label: AsideLabel): boolean {
+  if (!selection) return false;
+  if (label.kind === 'mesh') return propTab === 'mesh' && selection.mesh === label.index;
+  if (propTab !== 'material' || selection.material !== label.index) return false;
+  // A material shown within a mesh is lit on that mesh alone: other meshes using
+  // it are not what was picked. Shown on its own — from the Names tab — it is
+  // lit wherever it is named.
+  return selection.mesh === undefined || selection.mesh === label.mesh;
 }
 
 function placeholderSlot(modifier: string): HTMLSpanElement {
@@ -676,7 +955,9 @@ function updateRowState(row: Row): void {
 function modifiedCount(): number {
   let count = 0;
   for (const entryRows of rowsByEntry.values()) {
-    if (entryRows[0].input.value !== entryRows[0].original) count++;
+    // The document, not the field: a rejected name is in a field but not in the
+    // file, and the count is about what would be downloaded.
+    if (getName(entryRows[0].entry) !== entryRows[0].original) count++;
   }
   return count;
 }
@@ -753,6 +1034,466 @@ function showFlash(message: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Files tab
+//
+// What the model was opened from, as the folder it arrived as: the .glb/.gltf
+// itself plus every sidecar dropped alongside it, each saying what the document
+// uses it for. A .glb usually arrives alone; a .gltf brings its .bin and its
+// textures, and this is where you can see which of them actually turned up.
+
+/** Every file that came in with the model, and what the document does with it. */
+function folderFiles(): FolderFile[] {
+  const json = gltfJson;
+  if (!json) return [];
+
+  // Which supplied file each declared URI resolves to. Going through the same
+  // lookup the preview uses is the point: a file listed as used here is one the
+  // preview really found, spelling differences and all.
+  const lookup = buildResourceLookup(resources);
+  const { buffers, images } = listExternalResources(json);
+  const uses = new Map<File, { uris: string[]; role: FileRole }>();
+  for (const [uris, role] of [
+    [buffers, 'buffer'],
+    [images, 'image'],
+  ] as [string[], FileRole][]) {
+    for (const uri of uris) {
+      const file = resolveResource(lookup, uri);
+      if (!file) continue;
+      const use = uses.get(file);
+      if (!use) {
+        uses.set(file, { uris: [uri], role });
+        continue;
+      }
+      use.uris.push(uri);
+      // One file serving both: 'buffer' is the role worth showing, being the
+      // one the preview cannot do without.
+      if (role === 'buffer') use.role = 'buffer';
+    }
+  }
+  const added = new Set(addedImages.values());
+
+  const files: FolderFile[] = [];
+  if (modelPath !== '') {
+    files.push({ path: modelPath, size: modelSize, role: 'model', usedAs: [] });
+  }
+  for (const [path, file] of resources) {
+    const use = uses.get(file);
+    files.push({
+      path,
+      size: file.size,
+      // An image the user brought in is used, but saying so would hide the more
+      // interesting fact that it is not part of the file yet.
+      role: added.has(file) ? 'added' : use?.role ?? 'unused',
+      usedAs: use?.uris ?? [],
+    });
+  }
+  return files;
+}
+
+const FILE_ICONS: Record<FileRole, IconName> = {
+  model: 'fileModel',
+  buffer: 'fileData',
+  image: 'image',
+  added: 'image',
+  unused: 'file',
+};
+
+function fileTitle(file: FolderFile): string {
+  switch (file.role) {
+    case 'model':
+      return 'The open file';
+    case 'added':
+      return sourceIsGlb
+        ? 'Added from disk — the downloaded .glb carries its bytes'
+        : 'Added from disk — save it next to the downloaded .gltf';
+    case 'unused':
+      return 'Supplied, but this model does not refer to it';
+    default:
+      return `Used as ${file.usedAs.join(', ')}`;
+  }
+}
+
+function renderFiles(): void {
+  fileTreeEl.textContent = '';
+  fileTreeRows = [];
+
+  const files = folderFiles();
+  if (files.length === 0) {
+    filesSummary.textContent = '—';
+    fileTreeEl.append(emptyState('No file open.'));
+    clearFileSelection();
+    renderMissingFiles();
+    return;
+  }
+
+  const list = document.createElement('ul');
+  for (const row of buildFolderRows(files)) fileTreeRows.push(addFileRow(list, row));
+  fileTreeEl.append(list);
+  applyFileVisibility();
+
+  // Every element is new, so the pick and the preview are re-attached — or
+  // dropped, when what they pointed at is not in the folder any more. The file
+  // is compared, not just the path: one can be replaced at the path of another.
+  if (previewFile && resources.get(previewFile.path) !== previewFile.file) clearFilePreview();
+  if (selectedFilePath !== null && !fileTreeRows.some((row) => row.path === selectedFilePath)) {
+    selectedFilePath = null;
+  }
+  markFileSelection();
+
+  // The size is the folder's, model included; 'unused' is only ever about the
+  // files supplied alongside it.
+  const total = files.reduce((sum, file) => sum + Math.max(file.size, 0), 0);
+  const unused = files.filter((file) => file.role === 'unused').length;
+  const parts = [plural(files.length, 'file')];
+  if (total > 0) parts.push(formatBytes(total));
+  if (unused > 0) parts.push(`${unused} unused`);
+  filesSummary.textContent = parts.join(' · ');
+
+  renderMissingFiles();
+}
+
+function addFileRow(list: HTMLUListElement, spec: FolderRow): FileTreeRow {
+  const el = document.createElement('li');
+  el.className = 'file-row';
+
+  const main = document.createElement('div');
+  main.className = 'file-main';
+  main.style.setProperty('--depth', String(Math.min(spec.depth, 12)));
+
+  let disclose: HTMLButtonElement | null = null;
+  if (spec.file === null) {
+    el.classList.add('folder');
+    disclose = document.createElement('button');
+    disclose.type = 'button';
+    // The glyph is drawn in CSS the way the outliner's opener is.
+    disclose.className = 'row-btn disclose';
+    disclose.addEventListener('click', (event) => {
+      // The row is pickable as a whole, so the opener has to keep its click.
+      event.stopPropagation();
+      toggleFolder(spec.path);
+    });
+    main.append(disclose, typeIcon('folder'));
+  } else {
+    el.classList.add(spec.file.role);
+    main.append(placeholderSlot('slot-disclose'), typeIcon(FILE_ICONS[spec.file.role]));
+  }
+
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = spec.label;
+  main.append(name);
+
+  // Only the two states worth a word get one; the glyph carries the rest.
+  if (spec.file?.role === 'added' || spec.file?.role === 'unused') {
+    const tag = document.createElement('span');
+    tag.className = 'file-tag';
+    tag.textContent = spec.file.role;
+    main.append(tag);
+  }
+
+  const size = document.createElement('span');
+  size.className = 'file-size';
+  size.textContent = spec.file
+    ? formatBytes(spec.file.size)
+    : [plural(spec.fileCount, 'file'), spec.totalSize > 0 ? formatBytes(spec.totalSize) : '']
+        .filter((part) => part !== '')
+        .join(' · ');
+
+  // The file behind the row, which is what makes it previewable and removable.
+  // The model has none: only its bytes were kept, not the File it came from.
+  const file = spec.file === null ? undefined : resources.get(spec.path);
+  const showable = file !== undefined && isDisplayableFile(file);
+  if (showable) el.classList.add('previewable');
+
+  const notes = [spec.path];
+  if (spec.file) notes.push(fileTitle(spec.file));
+  if (showable) notes.push('Click to see it');
+  else if (file && isImageFile(file)) notes.push('Compressed texture — no preview in a browser');
+  el.title = notes.join('\n');
+
+  // Every row is a tab stop, so Delete has something to act on without a click.
+  el.tabIndex = 0;
+  el.addEventListener('click', () => activateFileRow(spec.path));
+
+  el.append(main, size, spec.file?.role === 'model' ? fileSlot() : removeButton(spec));
+  list.append(el);
+
+  // A folder shut before the last rebuild stays shut.
+  const collapsed = spec.file === null && collapsedFolders.has(spec.path);
+  el.classList.toggle('collapsed', collapsed);
+  if (disclose) {
+    disclose.setAttribute('aria-expanded', String(!collapsed));
+    disclose.title = collapsed ? 'Expand' : 'Collapse';
+  }
+  return { ...spec, el };
+}
+
+function fileSlot(): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'file-slot';
+  return span;
+}
+
+/**
+ * Un-supplies the row: the file stops standing in for whatever URI it covered.
+ * Kept as a hover button as well as the Delete key, since a control nobody can
+ * see is a control nobody uses.
+ */
+function removeButton(spec: FolderRow): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'row-btn remove';
+  button.innerHTML = iconSvg('remove');
+  button.title =
+    spec.file === null
+      ? `Remove the ${plural(spec.fileCount, 'file')} in this folder`
+      : 'Remove this file';
+  button.addEventListener('click', (event) => {
+    // The row is pickable as a whole; removing it is not also picking it.
+    event.stopPropagation();
+    removeFileRow(spec.path);
+  });
+  return button;
+}
+
+/** Formats a browser will decode in an `<img>`; KTX2/basis/DDS are not among them. */
+function isDisplayableFile(file: File): boolean {
+  // The extension is checked first: a texture folder always has them, while
+  // some file managers hand over a wrong MIME type or none at all.
+  if (/\.(png|jpe?g|webp|avif|gif|bmp)$/i.test(file.name)) return true;
+  return /^image\/(png|jpeg|webp|avif|gif|bmp)$/.test(file.type);
+}
+
+/** Clicking a row, or pressing Enter on it. */
+function activateFileRow(path: string): void {
+  const row = fileTreeRows.find((candidate) => candidate.path === path);
+  if (!row) return;
+
+  if (row.file === null) {
+    toggleFolder(path);
+    selectFileRow(path);
+    return;
+  }
+  // Clicking what is already open puts it away again, the way clicking the
+  // active gizmo mode does.
+  if (selectedFilePath === path) {
+    clearFileSelection();
+    return;
+  }
+  selectFileRow(path);
+
+  const file = resources.get(path);
+  if (file && isDisplayableFile(file)) showFilePreview(path, file);
+  else clearFilePreview();
+}
+
+function selectFileRow(path: string): void {
+  selectedFilePath = path;
+  markFileSelection();
+}
+
+function clearFileSelection(): void {
+  selectedFilePath = null;
+  clearFilePreview();
+  markFileSelection();
+}
+
+function markFileSelection(): void {
+  for (const row of fileTreeRows) {
+    row.el.classList.toggle('selected', row.path === selectedFilePath);
+  }
+}
+
+/**
+ * Shows an image file at something like full size, straight from the bytes on
+ * the user's disk — the document need not refer to it at all, which is what
+ * makes it useful for the textures nothing is bound to yet.
+ */
+function showFilePreview(path: string, file: File): void {
+  clearFilePreview();
+  const current = { path, file, url: URL.createObjectURL(file) };
+  previewFile = current;
+
+  previewPanel.hidden = false;
+  previewHost.textContent = '';
+  previewHost.classList.remove('failed');
+  previewName.textContent = path;
+  previewMeta.textContent = formatBytes(file.size);
+
+  const img = document.createElement('img');
+  img.alt = baseName(path);
+  // Decoding is asynchronous, and the panel may have moved on by the time it
+  // finishes — so both handlers check they are still the current one.
+  img.addEventListener('load', () => {
+    if (previewFile !== current) return;
+    previewMeta.textContent = `${img.naturalWidth} × ${img.naturalHeight} · ${formatBytes(file.size)}`;
+  });
+  img.addEventListener('error', () => {
+    if (previewFile !== current) return;
+    previewHost.classList.add('failed');
+    previewMeta.textContent = `${formatBytes(file.size)} · could not be decoded`;
+  });
+  img.src = current.url;
+  previewHost.append(img);
+}
+
+function clearFilePreview(): void {
+  if (previewFile) URL.revokeObjectURL(previewFile.url);
+  previewFile = null;
+  previewHost.textContent = '';
+  previewHost.classList.remove('failed');
+  previewPanel.hidden = true;
+}
+
+/** Delete on a row, or its × button. A folder takes everything under it. */
+function removeFileRow(path: string): void {
+  const position = fileTreeRows.findIndex((row) => row.path === path);
+  if (position < 0) return;
+  const row = fileTreeRows[position];
+
+  if (row.file?.role === 'model') {
+    showFlash('That is the open file itself — File → Close puts it away');
+    return;
+  }
+
+  let paths: string[];
+  let label: string;
+  if (row.file !== null) {
+    paths = [path];
+    label = row.label;
+  } else {
+    // The model is not one of the supplied files, so a folder holding it gives
+    // up everything except the model.
+    paths = filesUnder(fileTreeRows, position)
+      .filter((file) => file.role !== 'model')
+      .map((file) => file.path);
+    label = `${plural(paths.length, 'file')} in ${row.label}`;
+  }
+
+  if (paths.length === 0) {
+    showFlash('Nothing to remove there');
+    return;
+  }
+  removeFiles(paths, label, position);
+}
+
+/**
+ * Forgets supplied files. Nothing on disk is touched: they simply stop being
+ * available, exactly as if they had never been dropped in — so a URI one of
+ * them covered moves straight to "Not supplied", and dropping it back in undoes
+ * this completely.
+ */
+function removeFiles(paths: string[], label: string, focusAt: number): void {
+  const removed: string[] = [];
+  for (const path of paths) {
+    const file = resources.get(path);
+    if (file === undefined) continue;
+    resources.delete(path);
+    removed.push(path);
+    // An image brought in from disk is held twice; forgetting it in one place
+    // only would leave the export embedding bytes the tab says are gone.
+    for (const [index, added] of addedImages) {
+      if (added === file) addedImages.delete(index);
+    }
+  }
+  if (removed.length === 0) return;
+
+  if (previewFile && removed.includes(previewFile.path)) clearFilePreview();
+  selectedFilePath = null;
+  // A thumbnail may have been drawn from a file that is no longer there.
+  releaseImageUrls();
+  propSignature = '';
+  renderProperties();
+  renderFiles();
+  focusFileRowAt(focusAt);
+  // The stored session keeps the supplied files, so it has to lose them too.
+  void saveSourceRecord();
+  // The preview was built with them; without the .bin it now says so.
+  if (gltfJson) void startViewer({ keepView: true });
+  showFlash(`Removed ${label} — nothing on your disk was touched`);
+}
+
+/** Keeps the keyboard where it was, so Delete can be pressed twice running. */
+function focusFileRowAt(position: number): void {
+  const at = Math.min(position, fileTreeRows.length - 1);
+  for (const step of [1, -1]) {
+    for (let index = at; index >= 0 && index < fileTreeRows.length; index += step) {
+      if (fileTreeRows[index].el.hidden) continue;
+      fileTreeRows[index].el.focus();
+      return;
+    }
+  }
+}
+
+function moveFileFocus(from: FileTreeRow, step: number): void {
+  const start = fileTreeRows.indexOf(from);
+  for (let index = start + step; index >= 0 && index < fileTreeRows.length; index += step) {
+    if (fileTreeRows[index].el.hidden) continue;
+    fileTreeRows[index].el.focus();
+    return;
+  }
+}
+
+function toggleFolder(path: string): void {
+  if (collapsedFolders.has(path)) collapsedFolders.delete(path);
+  else collapsedFolders.add(path);
+  const collapsed = collapsedFolders.has(path);
+
+  for (const row of fileTreeRows) {
+    if (row.file !== null || row.path !== path) continue;
+    row.el.classList.toggle('collapsed', collapsed);
+    const disclose = row.el.querySelector<HTMLButtonElement>('.disclose');
+    disclose?.setAttribute('aria-expanded', String(!collapsed));
+    if (disclose) disclose.title = collapsed ? 'Expand' : 'Collapse';
+  }
+  applyFileVisibility();
+}
+
+/** A collapsed folder hides the run of deeper rows that follows it. */
+function applyFileVisibility(): void {
+  let floor = Infinity;
+  for (const row of fileTreeRows) {
+    const hidden = row.depth > floor;
+    if (!hidden) {
+      floor = row.file === null && collapsedFolders.has(row.path) ? row.depth : Infinity;
+    }
+    row.el.hidden = hidden;
+  }
+}
+
+/** The URIs the document declares that nothing supplied covers. */
+function renderMissingFiles(): void {
+  const json = gltfJson;
+  missingFilesEl.textContent = '';
+  if (!json) {
+    missingPanel.hidden = true;
+    return;
+  }
+
+  const lookup = buildResourceLookup(resources);
+  const { buffers, images } = listExternalResources(json);
+  const missing = [
+    ...findMissing(buffers, lookup).map((uri) => ({ uri, required: true })),
+    ...findMissing(images, lookup).map((uri) => ({ uri, required: false })),
+  ];
+  missingPanel.hidden = missing.length === 0;
+
+  for (const { uri, required } of missing) {
+    const item = document.createElement('li');
+    item.textContent = uri;
+    item.classList.toggle('required', required);
+    item.title = required
+      ? 'Needed before the preview can draw anything'
+      : 'Optional — the preview shows a placeholder without it';
+    missingFilesEl.append(item);
+  }
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+// ---------------------------------------------------------------------------
 // Filtering, collapsing, replace, export
 
 function applyFilter(): void {
@@ -761,7 +1502,11 @@ function applyFilter(): void {
     row.filtered =
       query === '' ||
       row.input.value.toLowerCase().includes(query) ||
-      row.original.toLowerCase().includes(query);
+      row.original.toLowerCase().includes(query) ||
+      // Mesh data and materials have no rows here any more, so the row naming
+      // them answers for them.
+      (row.mesh !== undefined && getName(row.mesh.entry).toLowerCase().includes(query)) ||
+      row.materials.some((use) => getName(use.entry).toLowerCase().includes(query));
   }
   applyRowVisibility();
 }
@@ -786,10 +1531,6 @@ function applyRowVisibility(): void {
 
   for (const group of noteGroups) {
     group.el.hidden = group.rows.every((row) => row.el.hidden);
-  }
-  for (const section of namesEl.querySelectorAll<HTMLElement>('.category')) {
-    const anyVisible = [...section.querySelectorAll<HTMLElement>('.row')].some((el) => !el.hidden);
-    section.hidden = !anyVisible;
   }
 }
 
@@ -839,8 +1580,9 @@ function replaceAll(): void {
 
   const undo: { entry: NamedEntry; value: string }[] = [];
   const done = new Set<NamedEntry>();
+  let clashes = 0;
   for (const row of rows) {
-    if (!row.filtered) continue; // respect the active filter
+    if (!row.filtered || row.fixed) continue; // respect the filter; skip the file
     // The same entry can own several rows; replacing twice would compound.
     if (done.has(row.entry)) continue;
     done.add(row.entry);
@@ -848,16 +1590,28 @@ function replaceAll(): void {
     const current = row.input.value;
     const next = replacer(current);
     if (next === current) continue;
+    // Replacing across a whole file is the easiest way to collide two material
+    // names, so the ones that would are left alone and counted.
+    if (materialNameClash(row.entry, next)) {
+      clashes++;
+      continue;
+    }
     undo.push({ entry: row.entry, value: current });
     setEntryName(row.entry, next);
   }
   replaceUndo = undo.length > 0 ? undo : null;
   updateFileStats();
   updateMenus();
+  const skipped =
+    clashes > 0
+      ? ` — ${clashes} material${clashes === 1 ? '' : 's'} left alone, the name is taken`
+      : '';
   showFlash(
     undo.length > 0
-      ? `Replaced in ${undo.length} name${undo.length === 1 ? '' : 's'} — Ctrl+Z to undo`
-      : 'No matches',
+      ? `Replaced in ${undo.length} name${undo.length === 1 ? '' : 's'} — Ctrl+Z to undo${skipped}`
+      : clashes > 0
+        ? `No name changed${skipped}`
+        : 'No matches',
   );
 }
 
@@ -942,6 +1696,73 @@ function resetAll(): void {
   showFlash('All names reset');
 }
 
+/**
+ * Puts the whole file back the way it was opened: names, transforms, texture
+ * bindings, and the images that were added along with them.
+ *
+ * The pristine bytes are kept for the preview anyway, so re-parsing them is
+ * both the shortest way to undo every kind of edit and the only one that
+ * cannot miss one — a new kind of edit needs nothing added here.
+ */
+function resetModel(): void {
+  const edited = gltfJson;
+  if (!edited) return;
+  if (modifiedCount() === 0 && !hasStructuralEdits() && addedImages.size === 0) {
+    showFlash('Nothing to reset');
+    return;
+  }
+
+  let pristine: GltfJson;
+  let chunks: GlbChunk[];
+  try {
+    if (sourceIsGlb) {
+      if (!sourceBuffer) throw new Error('the original file bytes are no longer available');
+      const parsed = parseGlb(sourceBuffer);
+      pristine = parsed.json;
+      chunks = parsed.otherChunks;
+    } else {
+      if (!sourceText) throw new Error('the original file text is no longer available');
+      pristine = parseGltfText(sourceText);
+      chunks = [];
+    }
+  } catch (error) {
+    // Nothing has been touched yet, so the document is still the edited one.
+    showFlash(`Could not reset: ${messageOf(error)}`);
+    return;
+  }
+
+  // An image added from disk goes with the edit that brought it in, and so does
+  // the file standing in for its URI — but only when it is still that same
+  // file, since a sidecar of the user's own may have taken the path over.
+  for (const [index, file] of addedImages) {
+    const uri = edited.images?.[index]?.uri;
+    if (uri !== undefined && resources.get(uri) === file) resources.delete(uri);
+  }
+  addedImages = new Map();
+  releaseImageUrls();
+
+  gltfJson = pristine;
+  glbChunks = chunks;
+  // The document is the file again, so every row's original is its own name.
+  originalNames = null;
+  mapEdits = 0;
+  movedNodes = new Map();
+  propTransform = null;
+  pendingSlot = null;
+  replaceUndo = null;
+
+  // Scene names are back to the file's, and the picker shows them.
+  updateSceneSelect(sceneIndex);
+  buildEditor();
+  // The added images belong to the stored file record, not the document one,
+  // which buildEditor() has already scheduled a write of.
+  void saveSourceRecord();
+  // Materials and transforms are only in the scene the preview built, so it has
+  // to be rebuilt — from the pristine bytes now, which is what it prefers.
+  void startViewer({ keepView: true });
+  showFlash('Model reset to how it was opened');
+}
+
 function closeFile(returnToDrop = true): void {
   // Closing a file gives up keeping it: the next thing stored is either the
   // file being opened right now, or nothing at all.
@@ -959,10 +1780,15 @@ function closeFile(returnToDrop = true): void {
   rows = [];
   rowsByEntry = new Map();
   rowsByTarget = new Map();
+  asideLabels = new Map();
   noteGroups = [];
   collapsedRows = new Set();
   allCollapsed = false;
   resources = new Map();
+  modelPath = '';
+  modelSize = -1;
+  collapsedFolders = new Set();
+  clearFileSelection();
   releaseImageUrls();
   addedImages = new Map();
   mapEdits = 0;
@@ -976,7 +1802,6 @@ function closeFile(returnToDrop = true): void {
   replaceUndo = null;
   viewport.classList.remove('busy');
   outlinerEl.textContent = '';
-  namesEl.textContent = '';
   flash.textContent = '';
   flash.hidden = true;
   clearTimeout(flashTimer);
@@ -990,6 +1815,7 @@ function closeFile(returnToDrop = true): void {
   setGridVisible(true);
   propSignature = '';
   renderProperties();
+  renderFiles();
   setOverlay(null);
   if (returnToDrop) {
     dropzone.hidden = false;
@@ -1077,6 +1903,8 @@ async function saveSourceRecord(): Promise<void> {
   const record: SourceRecord = {
     stamp: sessionStamp,
     fileName: sessionFileName,
+    filePath: modelPath,
+    fileSize: modelSize,
     isGlb: sourceIsGlb,
     wasPretty: sourceWasPretty,
     source,
@@ -1214,6 +2042,11 @@ function applySession({ source, doc, view }: Session): void {
   originalNames = captureOriginals(pristine, json);
   sourceIsGlb = source.isGlb;
   sourceWasPretty = source.wasPretty;
+  // Records from an earlier build know only the name; the bytes still give the
+  // size back for a .glb, and a .gltf simply shows no size for this one file.
+  modelPath = source.filePath ?? source.fileName;
+  modelSize =
+    source.fileSize ?? (source.source instanceof ArrayBuffer ? source.source.byteLength : -1);
   exportBaseName = source.fileName.replace(/\.(glb|gltf)$/i, '');
   // Records from an earlier build of the app can be missing pieces this one
   // expects; none of them is worth refusing the restore over.
@@ -1283,7 +2116,7 @@ function captureOriginals(
 }
 
 function isSidebarTab(value: string): value is SidebarTab {
-  return value === 'scene' || value === 'names' || value === 'tools';
+  return value === 'scene' || value === 'files' || value === 'tools';
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,6 +2305,7 @@ function addResources(picked: PickedFile[]): void {
   releaseImageUrls();
   propSignature = '';
   renderProperties();
+  renderFiles();
   showFlash(`Added ${picked.length} file${picked.length === 1 ? '' : 's'}`);
   // The preview will need these files again after a reload, so they join the
   // stored session as well.
@@ -1509,25 +2343,24 @@ function setGridVisible(visible: boolean): void {
 // ---------------------------------------------------------------------------
 // Selection & properties
 
-/**
- * A row's reference, enriched down the chain so selecting a node from the list
- * shows the same node/mesh/material properties as clicking it in the viewport.
- */
 function refFor(row: Row): SelectionRef | null {
-  if (!row.target) return null;
-  const { kind, index } = row.target;
-  const ref: SelectionRef = { [kind]: index };
+  return row.target ? refForTarget(row.target.kind, row.target.index) : null;
+}
 
-  const meshIndex = kind === 'node' ? gltfJson?.nodes?.[index]?.mesh : kind === 'mesh' ? index : undefined;
-  if (kind === 'node' && meshIndex !== undefined) ref.mesh = meshIndex;
-  if (meshIndex !== undefined) {
-    const material = gltfJson?.meshes?.[meshIndex]?.primitives?.[0]?.material;
-    if (typeof material === 'number') ref.material = material;
-  }
-  return ref;
+/**
+ * What picking one thing selects. A node is only ever a node: its mesh data has
+ * a row of its own, so showing the mesh and material of whatever it happens to
+ * draw would describe something the user did not pick. Mesh data does carry its
+ * material, the way the editor tabs geometry and material together.
+ */
+function refForTarget(kind: TargetKind, index: number): SelectionRef {
+  return narrowRef({ [kind]: index }) ?? { [kind]: index };
 }
 
 function selectTarget(ref: SelectionRef | null, options: { scroll?: boolean } = {}): void {
+  // Every producer goes through here — a row, a viewport pick, a restored
+  // session — so this is where a reference is reduced to the one thing it is.
+  ref = narrowRef(ref);
   selection = ref;
   viewer?.select(ref);
 
@@ -1549,6 +2382,26 @@ function selectTarget(ref: SelectionRef | null, options: { scroll?: boolean } = 
   updateMoveButtons();
   updateMenus();
   scheduleViewSave();
+}
+
+/**
+ * A viewport pick resolves to a node, its mesh data and their material at once,
+ * since one three.js object is all three. Only the most specific of those is
+ * what the user picked, though: clicking geometry picks the node it belongs to,
+ * and its mesh data is a row (and a selection) of its own.
+ */
+function narrowRef(ref: SelectionRef | null): SelectionRef | null {
+  if (!ref) return null;
+  if (ref.node !== undefined) return { node: ref.node };
+  if (ref.mesh !== undefined) {
+    // Mesh data comes with a material: the one that was picked out of the ones
+    // it uses, or else the first of them.
+    const uses = meshMaterials(gltfJson, ref.mesh);
+    const material = ref.material !== undefined && uses.includes(ref.material) ? ref.material : uses[0];
+    return material === undefined ? { mesh: ref.mesh } : { mesh: ref.mesh, material };
+  }
+  if (ref.material !== undefined) return { material: ref.material };
+  return null;
 }
 
 /** Rows for the most specific part of a reference that has any. */
@@ -1574,6 +2427,9 @@ function renderProperties(): void {
     }
   }
   if (parts.length > 0 && !parts.includes(propTab)) propTab = parts[0];
+
+  // Which chip beside a row is lit follows the tab, which has just been settled.
+  paintAsideSelection();
 
   // Rebuilding on every keystroke would blow away the focused field, so the
   // panel is only rebuilt when what it describes actually changes.
@@ -1620,6 +2476,12 @@ function buildPropertyPanel(kind: TargetKind, index: number): HTMLElement {
   panel.className = 'Panel';
 
   const entry = entryFor(kind, index);
+  // Which of the mesh's materials is being shown comes first: it says what the
+  // rest of the panel is about.
+  if (kind === 'material' && selection?.mesh !== undefined) {
+    const uses = meshMaterials(gltfJson, selection.mesh);
+    if (uses.length > 1) panel.append(materialSlotRow(selection.mesh, index, uses));
+  }
   panel.append(nameRow(kind, index, entry));
   panel.append(valueRow('Index', String(index), true));
 
@@ -1627,9 +2489,7 @@ function buildPropertyPanel(kind: TargetKind, index: number): HTMLElement {
     const node = gltfJson?.nodes?.[index];
     panel.append(valueRow('Type', nodeTypeLabel(index)));
     panel.append(valueRow('Children', String(node?.children?.length ?? 0), true));
-    if (node?.mesh !== undefined && selection?.mesh !== undefined) {
-      panel.append(linkRow('Mesh', 'mesh', node.mesh));
-    }
+    if (node?.mesh !== undefined) panel.append(linkRow('Mesh', 'mesh', node.mesh));
     if (node) for (const row of transformRows(index, node)) panel.append(row);
   } else if (kind === 'mesh') {
     const mesh = gltfJson?.meshes?.[index];
@@ -2246,16 +3106,46 @@ function nameRow(kind: TargetKind, index: number, entry: NamedEntry | undefined)
     const original = rowsByEntry.get(entry)?.[0]?.original ?? getName(entry);
     input.value = getName(entry);
     input.classList.toggle('modified', input.value !== original);
-    input.addEventListener('input', () => {
-      setEntryName(entry, input.value, input);
-      updateFileStats();
-    });
+    input.addEventListener('input', () => applyNameEdit(entry, input));
+    input.addEventListener('blur', () => settleNameEdit(entry, input));
     propFields.push({ entry, input, original });
   } else {
     input.disabled = true;
   }
 
   row.append(label, input);
+  return row;
+}
+
+/**
+ * The same choice the outliner puts beside a mesh, in the panel: which of the
+ * mesh's materials the tab is showing. It only appears for a mesh that has more
+ * than one, the way the editor's material panel only offers a slot when there
+ * is a slot to pick.
+ */
+function materialSlotRow(mesh: number, current: number, uses: number[]): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'Row material-row';
+  const label = document.createElement('span');
+  label.className = 'Label';
+  label.textContent = 'Material';
+
+  const select = document.createElement('select');
+  select.className = 'Select';
+  select.setAttribute('aria-label', 'Which of the mesh materials to show');
+  for (const material of uses) {
+    const option = document.createElement('option');
+    option.value = String(material);
+    option.textContent = materialLabel(getName(entryFor('material', material) ?? {}), material);
+    select.append(option);
+  }
+  select.value = String(current);
+  select.addEventListener('change', () => {
+    propTab = 'material';
+    selectTarget({ mesh, material: Number(select.value) });
+  });
+
+  row.append(label, select);
   return row;
 }
 
@@ -2272,7 +3162,7 @@ function valueRow(label: string, value: string, numeric = false): HTMLElement {
   return row;
 }
 
-/** A row that jumps the selection to a related entry, like the editor's links. */
+/** A row that moves the selection to a related entry, like the editor's links. */
 function linkRow(label: string, kind: TargetKind, index: number): HTMLElement {
   const row = document.createElement('div');
   row.className = 'Row';
@@ -2283,11 +3173,11 @@ function linkRow(label: string, kind: TargetKind, index: number): HTMLElement {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'Button';
-  const name = rowsByTarget.get(targetKey(kind, index))?.[0]?.input.value;
-  button.textContent = name || `${kind} ${index}`;
+  button.textContent = getName(entryFor(kind, index) ?? {}) || `${kind} ${index}`;
   button.addEventListener('click', () => {
+    // Set first: the panel keeps the tab when the new selection still has it.
     propTab = kind;
-    renderProperties();
+    selectTarget(refForTarget(kind, index), { scroll: true });
   });
 
   row.append(key, button);
@@ -2365,7 +3255,9 @@ function refreshVisibilityState(): void {
 /** How to refer to whatever is doing the hiding, using its current name. */
 function describeTarget(kind: TargetKind, index: number | undefined): string {
   if (index === undefined) return 'something above it';
-  const name = rowsByTarget.get(targetKey(kind, index))?.[0]?.input.value;
+  // From the document, not from a row: an object's row stands in for its mesh
+  // data as well, and its name is the object's.
+  const name = getName(entryFor(kind, index) ?? {});
   return name ? `${kind} "${name}"` : `${kind} ${index}`;
 }
 
@@ -2397,7 +3289,7 @@ function setTab(tab: SidebarTab): void {
   for (const span of tabsEl.querySelectorAll<HTMLElement>('span[data-tab]')) {
     span.classList.toggle('selected', span.dataset.tab === tab);
   }
-  for (const name of ['scene', 'names', 'tools'] as SidebarTab[]) {
+  for (const name of ['scene', 'files', 'tools'] as SidebarTab[]) {
     $(`#tab-${name}`).hidden = name !== tab;
   }
   sidebar.scrollTop = 0;
@@ -2405,12 +3297,23 @@ function setTab(tab: SidebarTab): void {
   scheduleViewSave();
 }
 
+let sidebarWidth = 350;
+
+/**
+ * Applies the width only. Storage is synchronous, and this runs on every
+ * pointer move of a drag, so persisting is left to `saveSidebarWidth`.
+ */
 function setSidebarWidth(width: number): void {
   const max = Math.max(280, window.innerWidth - 240);
   const clamped = Math.min(Math.max(width, 280), Math.min(720, max));
+  if (clamped === sidebarWidth) return;
+  sidebarWidth = clamped;
   document.documentElement.style.setProperty('--sidebar-width', `${clamped}px`);
+}
+
+function saveSidebarWidth(): void {
   try {
-    localStorage.setItem(SIDEBAR_KEY, String(clamped));
+    localStorage.setItem(SIDEBAR_KEY, String(sidebarWidth));
   } catch {
     // Private-mode storage failures are not worth surfacing.
   }
@@ -2444,7 +3347,7 @@ function setOptionInactive(action: string, inactive: boolean): void {
 
 function updateMenus(): void {
   const open = gltfJson !== null;
-  for (const action of ['download', 'reset', 'close', 'collapse', 'find', 'filter']) {
+  for (const action of ['download', 'reset', 'reset-all', 'close', 'collapse', 'find', 'filter']) {
     setOptionInactive(action, !open);
   }
   setOptionInactive('undo', replaceUndo === null);
@@ -2481,6 +3384,9 @@ function runMenuAction(action: string | undefined): void {
       break;
     case 'reset':
       resetAll();
+      break;
+    case 'reset-all':
+      resetModel();
       break;
     case 'close':
       closeFile();
@@ -2577,6 +3483,11 @@ function isEditingName(element: Element | null): boolean {
  * keys walk the tree without ever touching a name.
  */
 function beginRename(input: HTMLInputElement): void {
+  // The model row is the file it came from, not a name inside it.
+  if (input.closest('li.row')?.classList.contains('fixed')) {
+    input.focus();
+    return;
+  }
   input.readOnly = false;
   input.focus();
   input.select();
@@ -2586,6 +3497,10 @@ function beginRename(input: HTMLInputElement): void {
 function endRename(input: HTMLInputElement): void {
   input.readOnly = true;
   input.select();
+  // Enter and Escape end an edit without a blur, so a rejected name is settled
+  // here too rather than lingering in a field that is a label again.
+  const entry = entryForInput(input);
+  if (entry) settleNameEdit(entry, input);
 }
 
 /** A row is reachable only while on screen: collapsed, filtered-out and
@@ -2835,8 +3750,9 @@ sidebar.addEventListener('click', (event) => {
 
   const button = target.closest<HTMLButtonElement>('button[data-action]');
   if (!button) {
-    // Clicking the row itself selects it, the way the editor's outliner does.
-    if (target.tagName !== 'INPUT') {
+    // Clicking the row itself selects it, the way the editor's outliner does —
+    // but a field being typed into and an open dropdown are their own business.
+    if (target.tagName !== 'INPUT' && target.tagName !== 'SELECT') {
       const ref = refFor(row);
       if (ref) selectTarget(ref);
     }
@@ -2854,6 +3770,27 @@ sidebar.addEventListener('click', (event) => {
     case 'disclose':
       toggleDisclosure(position, row);
       break;
+    case 'select-mesh': {
+      const index = Number(button.dataset.mesh);
+      if (Number.isInteger(index)) {
+        propTab = 'mesh';
+        selectTarget(refForTarget('mesh', index));
+      }
+      break;
+    }
+    case 'select-material': {
+      const index = Number(button.dataset.material);
+      if (Number.isInteger(index)) {
+        const ref: SelectionRef = { material: index };
+        // The mesh the row names it under, so the panel can offer the same
+        // choice again and knows whose material this is.
+        const mesh = row.mesh?.index ?? (row.target?.kind === 'mesh' ? row.target.index : undefined);
+        if (mesh !== undefined) ref.mesh = mesh;
+        propTab = 'material';
+        selectTarget(ref);
+      }
+      break;
+    }
     case 'locate': {
       const ref = refFor(row);
       if (!ref || !viewer) break;
@@ -2892,11 +3829,61 @@ sidebar.addEventListener('keydown', (event) => {
 sidebar.addEventListener('pointerover', (event) => {
   if (!viewer) return;
   if ((event as PointerEvent).pointerType === 'touch') return;
-  const rowEl = (event.target as HTMLElement).closest<HTMLLIElement>('li.row');
+  const target = event.target as HTMLElement;
+  const rowEl = target.closest<HTMLLIElement>('li.row');
   const row = rowEl?.dataset.row === undefined ? undefined : rows[Number(rowEl.dataset.row)];
+  // Over something named beside a row, that is what is being pointed at — the
+  // mesh outlines every instance of itself, a material every object using it.
+  const chip = target.closest<HTMLElement>('.row-chip');
+  if (chip?.dataset.material !== undefined) {
+    viewer.highlight({ material: Number(chip.dataset.material) });
+    return;
+  }
+  if (chip?.dataset.mesh !== undefined) {
+    viewer.highlight({ mesh: Number(chip.dataset.mesh) });
+    return;
+  }
   viewer.highlight(row ? refFor(row) : null);
 });
 sidebar.addEventListener('pointerleave', () => viewer?.highlight(null));
+
+// The file tree's own keys. They are stopped here rather than left to bubble:
+// the outliner's arrow handling sits on `document`, and this is not its tree.
+fileTreeEl.addEventListener('keydown', (event) => {
+  const el = document.activeElement;
+  const li = el instanceof HTMLElement ? el.closest<HTMLLIElement>('li.file-row') : null;
+  const row = li === null ? undefined : fileTreeRows.find((candidate) => candidate.el === li);
+  if (!row || event.ctrlKey || event.metaKey || event.altKey) return;
+
+  const claim = (): void => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    claim();
+    removeFileRow(row.path);
+    return;
+  }
+  if (event.key === 'Enter' || event.key === ' ') {
+    claim();
+    activateFileRow(row.path);
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    claim();
+    moveFileFocus(row, event.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  // Left and right close and open a folder, as they do in the outliner.
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    if (row.file !== null) return;
+    const collapsed = collapsedFolders.has(row.path);
+    if (event.key === 'ArrowRight' ? !collapsed : collapsed) return;
+    claim();
+    toggleFolder(row.path);
+  }
+});
 
 searchInput.addEventListener('input', applyFilter);
 replaceBtn.addEventListener('click', replaceAll);
@@ -2909,6 +3896,7 @@ findInput.addEventListener('input', () => findInput.classList.remove('invalid'))
 
 exportBtn.addEventListener('click', () => void exportModel());
 resetBtn.addEventListener('click', resetAll);
+resetAllBtn.addEventListener('click', resetModel);
 closeBtn.addEventListener('click', () => closeFile());
 
 frameBtn.addEventListener('click', () => viewer?.frameAll());
@@ -2943,8 +3931,12 @@ sceneSelect.addEventListener('change', () => {
   void startViewer();
 });
 
-addFilesBtn.addEventListener('click', () => resourceInput.click());
-addFolderBtn.addEventListener('click', () => resourceFolderInput.click());
+for (const button of [addFilesBtn, filesAddBtn]) {
+  button.addEventListener('click', () => resourceInput.click());
+}
+for (const button of [addFolderBtn, filesAddFolderBtn]) {
+  button.addEventListener('click', () => resourceFolderInput.click());
+}
 for (const input of [resourceInput, resourceFolderInput]) {
   input.addEventListener('change', () => {
     if (input.files?.length) addResources(pickedFromList(input.files));
@@ -2963,9 +3955,16 @@ resizer.addEventListener('pointermove', (event) => {
   setSidebarWidth(window.innerWidth - event.clientX);
 });
 for (const type of ['pointerup', 'pointercancel'] as const) {
-  resizer.addEventListener(type, () => document.body.classList.remove('resizing'));
+  resizer.addEventListener(type, () => {
+    if (!document.body.classList.contains('resizing')) return;
+    document.body.classList.remove('resizing');
+    saveSidebarWidth();
+  });
 }
-resizer.addEventListener('dblclick', () => setSidebarWidth(350));
+resizer.addEventListener('dblclick', () => {
+  setSidebarWidth(350);
+  saveSidebarWidth();
+});
 
 document.addEventListener('keydown', (event) => {
   const target = event.target as HTMLElement | null;
@@ -3043,6 +4042,7 @@ document.addEventListener('visibilitychange', () => {
 initSidebarWidth();
 updateMoveButtons();
 outlinerEl.append(emptyState('No file open.'));
+renderFiles();
 renderProperties();
 updateMenus();
 void restoreSession();

@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sceneforge — rename glTF / GLB nodes, meshes &amp; materials</title>
+    <title>GlForge — rename glTF / GLB nodes, meshes &amp; materials</title>
     <meta
       name="description"
-      content="Free online tool to rename scenes, nodes, meshes, materials, animations and more inside glTF / GLB files, with a 3D preview that shows which name belongs to which object. Runs fully in your browser — files never leave your device."
+      content="Free online tool to rename the nodes, meshes and materials inside glTF / GLB files, with a 3D preview that shows which name belongs to which object, plus move/rotate/scale and texture wiring. Runs fully in your browser — files never leave your device."
     />
     <link
       rel="icon"
@@ -17,7 +17,7 @@
     <!-- Menubar ---------------------------------------------------------- -->
     <div id="menubar">
       <div class="menu brand">
-        <h1 class="title">Scene<span>forge</span></h1>
+        <h1 class="title">Gl<span>Forge</span></h1>
       </div>
 
       <div class="menu">
@@ -28,6 +28,7 @@
           <hr />
           <div class="option" data-action="download">Download<span class="key">Ctrl+S</span></div>
           <div class="option" data-action="reset">Reset names</div>
+          <div class="option" data-action="reset-all">Reset all changes</div>
           <hr />
           <div class="option" data-action="close">Close</div>
         </div>
@@ -157,7 +158,7 @@
     <div id="sidebar">
       <div id="tabs" role="tablist">
         <span data-tab="scene" class="selected" role="tab" tabindex="0">Scene</span>
-        <span data-tab="names" role="tab" tabindex="0">Names</span>
+        <span data-tab="files" role="tab" tabindex="0">Files</span>
         <span data-tab="tools" role="tab" tabindex="0">Tools</span>
       </div>
 
@@ -184,8 +185,59 @@
         <div id="properties" class="TabbedPanel"></div>
       </div>
 
-      <div id="tab-names" class="tab-panel" role="tabpanel" hidden>
-        <div id="names-list"></div>
+      <div id="tab-files" class="tab-panel" role="tabpanel" hidden>
+        <div class="Panel">
+          <div class="Row">
+            <span class="Label">Folder</span>
+            <span id="files-summary" class="Value">—</span>
+          </div>
+          <div class="Row">
+            <span class="Label"></span>
+            <span class="Buttons">
+              <button id="files-add-btn" class="Button" type="button">Add files…</button>
+              <button id="files-add-folder-btn" class="Button" type="button">Add folder…</button>
+            </span>
+          </div>
+        </div>
+
+        <div id="file-tree" class="Outliner FileTree"></div>
+
+        <div class="Panel" id="image-preview-panel" hidden>
+          <h2 class="PanelTitle">Preview</h2>
+          <div id="image-preview" class="image-preview"></div>
+          <div class="Row">
+            <span class="Label">File</span>
+            <span id="preview-name" class="Value"></span>
+          </div>
+          <div class="Row">
+            <span class="Label">Image</span>
+            <span id="preview-meta" class="Value"></span>
+          </div>
+        </div>
+
+        <div class="Panel" id="missing-panel" hidden>
+          <h2 class="PanelTitle">Not supplied</h2>
+          <ul id="missing-files"></ul>
+          <p class="note">
+            The model refers to these files, and they were not among the ones dropped in. Drop the
+            model's folder in, or use <strong>Add folder…</strong> above. Only the
+            <code>.bin</code> is needed before the preview can draw anything — a missing texture
+            just shows a placeholder, and renaming works either way.
+          </p>
+        </div>
+
+        <div class="Panel">
+          <p class="note">
+            Click a <code>.png</code>, <code>.jpg</code> or <code>.webp</code> above to see it,
+            and click it again to put it away. Compressed textures
+            (<code>.ktx2</code>, <code>.basis</code>, <code>.dds</code>) have no browser preview.
+          </p>
+          <p class="note">
+            Every file here is read from your device and never uploaded. A
+            <code>.glb</code> already carries its data and textures inside it, so it usually
+            arrives alone; a <code>.gltf</code> keeps them as the separate files listed above.
+          </p>
+        </div>
       </div>
 
       <div id="tab-tools" class="tab-panel" role="tabpanel" hidden>
@@ -226,7 +278,22 @@
             <span class="Label"></span>
             <span class="Buttons">
               <button id="export-btn" class="Button primary" type="button">Download</button>
-              <button id="reset-btn" class="Button" type="button">Reset names</button>
+              <button
+                id="reset-btn"
+                class="Button"
+                type="button"
+                title="Put every name back the way the file had it"
+              >
+                Reset names
+              </button>
+              <button
+                id="reset-all-btn"
+                class="Button"
+                type="button"
+                title="Put the whole file back the way it was opened — names, transforms and textures"
+              >
+                Reset all
+              </button>
               <button id="close-btn" class="Button" type="button">Close</button>
             </span>
           </div>
@@ -248,7 +315,7 @@
           <h2 class="PanelTitle">About</h2>
           <p class="note">
             Free &amp; open source. Everything is processed locally — nothing is uploaded.
-            <a href="https://github.com/ilya-nuhi/sceneforge" target="_blank" rel="noopener">
+            <a href="https://github.com/ilya-nuhi/glforge" target="_blank" rel="noopener">
               GitHub
             </a>
           </p>

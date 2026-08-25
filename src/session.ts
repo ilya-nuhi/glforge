@@ -29,6 +29,10 @@ import type { CameraView, GizmoMode, SelectionRef } from './viewer';
 export interface SourceRecord {
   stamp: number;
   fileName: string;
+  /** The path the model sat at in what was dropped, for the folder view. */
+  filePath?: string;
+  /** Its size in bytes; a .gltf text does not give one back on its own. */
+  fileSize?: number;
   isGlb: boolean;
   /** Whether the original `.gltf` text was indented, so export matches it. */
   wasPretty: boolean;
@@ -71,7 +75,7 @@ export interface Session {
  */
 export const MAX_SESSION_BYTES = 256 * 1024 * 1024;
 
-const DB_NAME = 'sceneforge';
+const DB_NAME = 'glforge';
 const DB_VERSION = 1;
 const STORE = 'session';
 /**
@@ -79,7 +83,7 @@ const STORE = 'session';
  * thing the shell needs *synchronously*, to say "Restoring …" on first paint
  * instead of flashing the dropzone for as long as an IndexedDB read takes.
  */
-const MARKER_KEY = 'sceneforge:session';
+const MARKER_KEY = 'glforge:session';
 
 export function storedSessionName(): string | null {
   try {

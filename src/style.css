@@ -143,6 +143,7 @@ hr {
 
 .Input.invalid {
   border-color: var(--danger);
+  color: var(--danger);
 }
 
 .Select {
@@ -552,17 +553,23 @@ body.resizing {
   position: sticky;
   top: 0;
   z-index: 1;
+  display: flex;
   background-color: var(--tabs);
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
   user-select: none;
 }
 
+/* Left-packed the way the editor's are, but allowed to shrink: four tabs would
+   otherwise overflow (and be clipped by the sidebar) at its narrowest. */
 #tabs span {
-  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text-dim);
   border-right: 1px solid var(--line);
-  padding: 10px 12px;
+  padding: 10px 11px;
   font-size: 12px;
   text-transform: uppercase;
   cursor: pointer;
@@ -657,38 +664,7 @@ body.resizing {
   outline: none !important;
 }
 
-#names-list {
-  font-size: 12px;
-}
-
-#names-list .category {
-  background: var(--field);
-  border-top: 1px solid var(--line);
-}
-
-#names-list .category h2 {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  padding: 6px 10px;
-  font-size: 11px;
-  font-weight: normal;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text);
-  background: var(--tabs);
-}
-
-#names-list .category h2 .count {
-  color: var(--text-dim);
-}
-
-.Outliner ul,
-#names-list ul {
+.Outliner ul {
   list-style: none;
   margin: 0;
   padding: 2px 0;
@@ -811,6 +787,12 @@ body.resizing {
   color: var(--accent);
 }
 
+/* A name the document refused — another material already answers to it. */
+.row input.invalid {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
 /* Hidden in the preview: struck through as well as dimmed, so the state does
    not rely on colour alone. */
 .row.hidden-3d input {
@@ -822,8 +804,106 @@ body.resizing {
   opacity: 0.5;
 }
 
+/* The file's own row is a heading: the name in it belongs to the file on disk,
+   not to anything in the document, so it is never opened for editing. */
+.row.fixed input {
+  color: var(--text-strong);
+  cursor: default;
+}
+
+.row.fixed input:hover {
+  border-color: transparent;
+}
+
 .row-slot {
   display: block;
+}
+
+/* An object names what it draws right after its own name — its mesh data, then
+   that mesh's materials — the way the three.js editor's outliner prints geometry
+   and material after an object name. One material is a chip, several are a
+   dropdown; every chip selects what it names. */
+.row-aside {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 4px;
+}
+
+/* The name field ends where its text does (sized in script) so the materials
+   follow the name instead of the row's edge — but a long name yields rather
+   than pushing them out of sight. */
+.row-main.has-aside input {
+  flex: 0 1 auto;
+  max-width: 60%;
+}
+
+.row-chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 12em;
+  padding: 0 2px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.row-chip:hover {
+  color: var(--text-strong);
+  border-color: #3a3a3a;
+}
+
+/* The chip on show is outlined rather than filled: inside an already-selected
+   row a fill of the same blue would vanish. */
+.row-chip.selected {
+  color: var(--text-strong);
+  border-color: var(--accent);
+}
+
+/* A chip that is only its symbol needs the room a name would have given it to
+   stay clickable. */
+.row-chip.glyph {
+  padding: 1px 3px;
+}
+
+/* A native dropdown draws its own arrow — which is what says it opens — and
+   lays out its own inside, so it is not a flex box like the chip is. */
+select.row-chip {
+  display: inline-block;
+  height: 18px;
+  outline: none;
+}
+
+.row-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-chip-name.unnamed {
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+.row-chip .type-icon,
+.row-aside > .type-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.row-chip .type-icon svg,
+.row-aside > .type-icon svg {
+  width: 10px;
+  height: 10px;
 }
 
 .type-icon {
@@ -890,6 +970,22 @@ body.resizing {
 
 .type-icon[data-icon='scene'] {
   color: #8888dd;
+}
+
+.type-icon[data-icon='folder'] {
+  color: #ccbb88;
+}
+
+.type-icon[data-icon='fileModel'] {
+  color: #8888ee;
+}
+
+.type-icon[data-icon='fileData'] {
+  color: #aaeeaa;
+}
+
+.type-icon[data-icon='file'] {
+  color: #888888;
 }
 
 /* Row buttons ------------------------------------------------------------ */
@@ -965,6 +1061,166 @@ body.resizing {
 
 .row-btn.locate:hover {
   color: var(--accent);
+}
+
+/* Files tab -------------------------------------------------------------- */
+
+/* Unlike the outliner, this list is often two or three rows long — a fixed
+   height would leave most of the box empty. It grows to fit, then scrolls. */
+.FileTree {
+  height: auto;
+  max-height: clamp(140px, 30vh, 460px);
+}
+
+.FileTree ul {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 6px;
+  padding-right: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.file-row:hover {
+  background-color: var(--select-soft);
+}
+
+.file-row.selected {
+  background-color: var(--select);
+}
+
+/* Rows are tab stops, so the keyboard has to be visible on them. */
+.file-row:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* An image that can be shown reads as something to click. */
+.file-row.previewable {
+  cursor: pointer;
+}
+
+.file-row.previewable:hover .file-name {
+  color: #fff;
+}
+
+.file-slot {
+  display: block;
+  width: 18px;
+}
+
+/* The hover-reveal the outliner's row buttons get, for this tree's own. */
+.file-row:hover .row-btn,
+.file-row:focus-within .row-btn,
+.file-row.selected .row-btn,
+.file-row .row-btn:focus-visible {
+  opacity: 1;
+}
+
+.file-row .row-btn.remove:hover {
+  color: var(--danger);
+}
+
+/* Opener, glyph and name travel together so a nested row indents as one unit,
+   the same way an outliner row does. */
+.file-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px 4px 3px calc(4px + var(--depth, 0) * 12px);
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-strong);
+}
+
+.file-row.folder .file-name {
+  color: var(--text);
+}
+
+/* A file the document never refers to is still worth listing — just not worth
+   as much attention as the ones it does. */
+.file-row.unused .file-name {
+  color: var(--text);
+}
+
+.file-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.file-row.added .file-tag {
+  color: var(--accent);
+}
+
+.file-size {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Checkerboarded, so a texture's transparency reads as transparency rather
+   than as a dark colour of its own. */
+.image-preview {
+  display: grid;
+  place-items: center;
+  min-height: 72px;
+  max-height: 260px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background-color: #191919;
+  background-image:
+    linear-gradient(45deg, #232323 25%, transparent 25%, transparent 75%, #232323 75%),
+    linear-gradient(45deg, #232323 25%, transparent 25%, transparent 75%, #232323 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+
+.image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 258px;
+  object-fit: contain;
+}
+
+.image-preview.failed::after {
+  content: '?';
+  font-size: 18px;
+  color: var(--text-dim);
+}
+
+#missing-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 9rem;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#missing-files li::before {
+  content: '· ';
+}
+
+/* The .bin is the one whose absence stops the preview outright. */
+#missing-files li.required {
+  color: var(--danger);
 }
 
 /* Properties ------------------------------------------------------------- */
@@ -1049,6 +1305,14 @@ body.scrubbing {
   height: 18px;
   margin: 0 4px;
   background: #333;
+}
+
+/* Which of a mesh's materials the panel is showing. */
+.material-row .Select {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Material names are the user's own, so they keep their capitalisation. */
+  text-transform: none;
 }
 
 /* Material texture slots ------------------------------------------------- */
@@ -1176,6 +1440,13 @@ body.scrubbing {
 
   .Outliner {
     height: 160px;
+  }
+
+  /* Still grows to fit — just with less room to grow into. Restated here
+     because the rule above would otherwise win on source order. */
+  .FileTree {
+    height: auto;
+    max-height: 160px;
   }
 }
 

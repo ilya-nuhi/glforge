@@ -997,7 +997,11 @@ export class Viewer {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.invalidate();
+    // Resizing the drawing buffer blanks it, and ResizeObserver runs after the
+    // frame's animation callbacks but before paint: deferring to the next frame
+    // would let the browser paint one empty canvas per step of a sidebar drag.
+    // Drawing here fills the new buffer in time for this frame's paint.
+    this.render();
   }
 
   /**
@@ -1013,6 +1017,11 @@ export class Viewer {
 
   private renderFrame(): void {
     this.frameRequested = false;
+    this.render();
+  }
+
+  /** The draw itself, callable outside an animation frame (see `resize`). */
+  private render(): void {
     if (this.disposed) return;
     // The pane can be collapsed; a later resize will invalidate again.
     if (this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
