@@ -383,6 +383,22 @@ export function textureLook(json: GltfJson, material: GltfMaterial, slot: MapSlo
   };
 }
 
+/** The extensions that point a texture at an image of their own, in the order GLTFLoader tries them. */
+const IMAGE_EXTENSIONS = ['KHR_texture_basisu', 'EXT_texture_webp', 'EXT_texture_avif'];
+
+/**
+ * The image a texture shows. An extension's image wins over the plain `source`,
+ * as it does in the loader, which every browser it runs in can decode.
+ */
+export function textureImage(json: GltfJson, textureIndex: number): number | undefined {
+  const texture = json.textures?.[textureIndex];
+  for (const name of IMAGE_EXTENSIONS) {
+    const source = (texture?.extensions?.[name] as { source?: unknown } | undefined)?.source;
+    if (typeof source === 'number') return source;
+  }
+  return texture?.source;
+}
+
 /** Every map slot, in every material, that shows a texture. */
 export function textureUsers(json: GltfJson, textureIndex: number): { material: number; slot: MapSlot }[] {
   const users: { material: number; slot: MapSlot }[] = [];

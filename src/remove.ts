@@ -209,7 +209,7 @@ function keepChannel(
 }
 
 /** The given nodes and everything under them. */
-function subtreeOf(nodes: GltfNode[], roots: number[]): Set<number> {
+export function subtreeOf(nodes: GltfNode[], roots: number[]): Set<number> {
   const found = new Set<number>();
   const pending = [...roots];
   while (pending.length > 0) {

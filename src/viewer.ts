@@ -97,6 +97,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import type { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { AnimationPlayer, type ClipInfo, type ClipRange, type PlaybackState } from './animation';
 import type { CompressionUse, GltfJson, GltfMaterial } from './gltf';
 import {
@@ -108,7 +109,7 @@ import {
   type MaterialType,
 } from './material';
 import { baseName, buildResourceLookup, normalizeUri } from './resources';
-import { MAP_SLOT_NAMES, textureLook, type TextureLook } from './texture';
+import { MAP_SLOT_NAMES, textureImage, textureLook, type TextureLook } from './texture';
 import {
   categoryOf,
   hasTransform,
@@ -265,6 +266,12 @@ interface LoadedModel {
   textureCount: number;
   /** Texture copies this class made, and is therefore responsible for. */
   ownedTextures: Set<Texture>;
+  /**
+   * Which of the file's images each texture shows, by the image data the
+   * loader's textures and every copy of them share. Made when a preview first
+   * asks, and again after a texture the loader had not made yet comes in.
+   */
+  imageSources: Map<Texture['source'], number> | null;
   tracked: Object3D[];
   blobUrls: string[];
   /** The file's own pose, before the scene placed it anywhere. */
@@ -284,6 +291,14 @@ interface LoadedModel {
 }
 
 type HiddenSets = Record<HideKind, Set<number>>;
+
+/** An image's preview as it shows on one texture of the scene's. */
+interface Twin {
+  preview: Texture;
+  texture: Texture;
+  /** Drops the twin along with the texture it stands in for. */
+  release: () => void;
+}
 
 type LightHelper = DirectionalLightHelper | HemisphereLightHelper | PointLightHelper | SpotLightHelper;
 
@@ -388,6 +403,20 @@ export class Viewer {
   private helperSize = 10 * HELPER_SCALE;
 
   private placeholderUrl: string | null = null;
+
+  /**
+   * What the Download panel would put in the file in place of each model's
+   * images, by model and then image index.
+   */
+  private readonly imagePreviews = new Map<number, Map<number, Texture>>();
+  /** The newest call for each model's image, so a slower decode never lands over a newer one. */
+  private readonly previewCalls = new Map<number, Map<number, number>>();
+  private previewCallCount = 0;
+  /** The stand-in for each of the scene's textures whose image has a preview. */
+  private readonly twins = new Map<Texture, Twin>();
+  /** Turns KTX2 previews into textures; made with the first of them. */
+  private previewLoader: KTX2Loader | null = null;
+  private previewDecodes = 0;
   /**
    * Every model and every shape at once: what the grid and the depth range are
    * fitted to.
@@ -644,6 +673,7 @@ export class Viewer {
       parser: gltf.parser,
       textureCount: (gltf.parser.json as { textures?: unknown[] }).textures?.length ?? 0,
       ownedTextures: new Set(),
+      imageSources: null,
       tracked: [],
       blobUrls,
       localBox: new Box3(),
@@ -873,6 +903,8 @@ export class Viewer {
       if (loaded === null) return false;
       // The model may have been reloaded or closed while the texture decoded.
       if (this.disposed || this.models.get(id) !== model) return false;
+      // It may be a texture the loader had not made before, of an image a preview is for.
+      model.imageSources = null;
 
       // Colour space belongs to the slot, not the image, and the parser hands
       // out one shared instance per texture — so each slot gets its own view of
@@ -966,6 +998,192 @@ export class Viewer {
         if (look && look.anisotropy > 1) this.applyTextureLook(model, index, slot, look);
       }
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Texture preview
+
+  /**
+   * Shows `encoded` in place of one of a model's images — what the Download
+   * panel would write into the file — or, given null, the image itself again.
+   *
+   * A preview is never left on a material between draws: `render` puts it on
+   * every map showing the image and takes it straight back off. So every edit
+   * goes on working on the textures the file has, a reload finds the preview
+   * still in place, and taking it away is only forgetting it.
+   */
+  async previewImage(
+    id: number,
+    image: number,
+    encoded: { bytes: Uint8Array<ArrayBuffer>; mimeType: string } | null,
+  ): Promise<void> {
+    let calls = this.previewCalls.get(id);
+    if (!calls) this.previewCalls.set(id, (calls = new Map()));
+    const call = ++this.previewCallCount;
+    calls.set(image, call);
+
+    let texture: Texture | null = null;
+    let failure: unknown = null;
+    if (encoded) {
+      try {
+        texture = await this.decodePreview(encoded);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    // A newer call for the image, or a clear, came in while this one decoded.
+    if (this.disposed || this.previewCalls.get(id)?.get(image) !== call) {
+      if (texture) releasePreview(texture);
+      return;
+    }
+
+    let previews = this.imagePreviews.get(id);
+    const previous = previews?.get(image);
+    if (previous) this.dropPreview(previous);
+    if (texture) {
+      if (!previews) this.imagePreviews.set(id, (previews = new Map()));
+      previews.set(image, texture);
+    } else {
+      previews?.delete(image);
+      if (previews?.size === 0) this.imagePreviews.delete(id);
+    }
+    this.invalidate();
+    // The image shows as it is, which the caller has to be told is not the preview.
+    if (failure !== null) throw asError(failure);
+  }
+
+  /** Puts every one of a model's own images back on screen. */
+  clearImagePreviews(id: number): void {
+    // Decodes still running for the model are not wanted any more either.
+    this.previewCalls.delete(id);
+    const previews = this.imagePreviews.get(id);
+    if (!previews) return;
+    for (const preview of previews.values()) this.dropPreview(preview);
+    this.imagePreviews.delete(id);
+    // A KTX2 loader left alive makes the next model load warn about two of them.
+    if (this.imagePreviews.size === 0 && this.previewDecodes === 0) {
+      this.previewLoader?.dispose();
+      this.previewLoader = null;
+    }
+    this.invalidate();
+  }
+
+  /** A texture holding the pixels a download would carry, not yet set up as any slot's. */
+  private async decodePreview({
+    bytes,
+    mimeType,
+  }: {
+    bytes: Uint8Array<ArrayBuffer>;
+    mimeType: string;
+  }): Promise<Texture> {
+    if (mimeType !== 'image/ktx2') {
+      // As GLTFLoader reads an image: no premultiplying, no colour management.
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: mimeType }), {
+        premultiplyAlpha: 'none',
+        colorSpaceConversion: 'none',
+      });
+      return new Texture(bitmap);
+    }
+
+    this.previewDecodes++;
+    try {
+      if (!this.previewLoader) {
+        const { KTX2Loader: Loader } = await import('three/addons/loaders/KTX2Loader.js');
+        // Another decode may have made one while this one was importing.
+        this.previewLoader ??= new Loader().detectSupport(this.renderer);
+      }
+      const loader = this.previewLoader;
+      // The loader hands its buffer to a worker, so it is given one of its own.
+      const buffer = bytes.slice().buffer;
+      return await new Promise<Texture>((resolve, reject) => {
+        loader.parse(buffer, resolve, (error) => reject(asError(error)));
+      });
+    } finally {
+      this.previewDecodes--;
+    }
+  }
+
+  /** Frees a preview, and every stand-in made from it. */
+  private dropPreview(preview: Texture): void {
+    for (const [original, twin] of this.twins) {
+      if (twin.preview === preview) this.releaseTwin(original, twin);
+    }
+    releasePreview(preview);
+  }
+
+  /**
+   * Puts each previewed image's stand-in on every map showing that image, for
+   * one draw. Returns what puts the file's own textures back.
+   */
+  private swapInPreviews(): () => void {
+    if (this.imagePreviews.size === 0) return NOTHING_SWAPPED;
+    const swapped: { maps: Record<string, Texture | null | undefined>; key: string; texture: Texture }[] = [];
+    for (const [id, previews] of this.imagePreviews) {
+      const model = this.models.get(id);
+      if (!model) continue;
+      const images = this.imagesBySource(model);
+      for (const materials of model.materialsByIndex.values()) {
+        for (const material of materials) {
+          const maps = material as unknown as Record<string, Texture | null | undefined>;
+          for (const key of MAP_KEYS) {
+            const texture = maps[key];
+            if (!texture?.isTexture) continue;
+            const image = images.get(texture.source);
+            const preview = image === undefined ? undefined : previews.get(image);
+            if (!preview) continue;
+            maps[key] = this.twinOf(texture, preview);
+            swapped.push({ maps, key, texture });
+          }
+        }
+      }
+    }
+    return () => {
+      for (const { maps, key, texture } of swapped) maps[key] = texture;
+    };
+  }
+
+  private imagesBySource(model: LoadedModel): Map<Texture['source'], number> {
+    if (model.imageSources) return model.imageSources;
+    const json = model.parser.json as GltfJson;
+    const images = new Map<Texture['source'], number>();
+    // The loader notes which texture each texture it makes is; the copies a
+    // slot gets for its transform or colour space share the same image data.
+    for (const [object, reference] of model.parser.associations) {
+      const texture = object as Texture;
+      if (!texture.isTexture || reference.textures === undefined) continue;
+      const image = textureImage(json, reference.textures);
+      if (image !== undefined) images.set(texture.source, image);
+    }
+    model.imageSources = images;
+    return images;
+  }
+
+  /** The stand-in showing `preview` the way `original` shows its own image, made once. */
+  private twinOf(original: Texture, preview: Texture): Texture {
+    let twin = this.twins.get(original);
+    if (twin && twin.preview !== preview) {
+      this.releaseTwin(original, twin);
+      twin = undefined;
+    }
+    if (!twin) {
+      // A texture the scene lets go of — replaced on its slot, or its model
+      // reloaded — takes its stand-in with it.
+      const release = (): void => {
+        const current = this.twins.get(original);
+        if (current) this.releaseTwin(original, current);
+      };
+      twin = { preview, texture: makeTwin(original, preview), release };
+      original.addEventListener('dispose', release);
+      this.twins.set(original, twin);
+    }
+    syncTwin(twin.texture, original);
+    return twin.texture;
+  }
+
+  private releaseTwin(original: Texture, twin: Twin): void {
+    original.removeEventListener('dispose', twin.release);
+    twin.texture.dispose();
+    this.twins.delete(original);
   }
 
   // -------------------------------------------------------------------------
@@ -2161,7 +2379,13 @@ export class Viewer {
     this.updateHelpers();
     this.fitShadowCameras();
     const start = performance.now();
-    this.renderer.render(this.scene, this.camera);
+    // Previewed images stand in for the file's own for this draw alone.
+    const restore = this.swapInPreviews();
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      restore();
+    }
     this.renderTime = performance.now() - start;
     this.callbacks.onRender();
     // Damping keeps moving the camera for a few frames after input stops.
@@ -2198,6 +2422,9 @@ export class Viewer {
     }
     this.envTexture?.dispose();
     this.envTexture = null;
+    for (const id of [...this.imagePreviews.keys()]) this.clearImagePreviews(id);
+    this.previewLoader?.dispose();
+    this.previewLoader = null;
     this.scene.remove(this.gizmo.getHelper());
     this.gizmo.disconnect();
     this.gizmo.dispose();
@@ -2565,6 +2792,67 @@ function applyLook(material: Material, look: MaterialLook, flippedNormals: boole
   // As the loader has it: blended surfaces leave depth alone (three.js #17706).
   material.depthWrite = !transparent;
   material.alphaTest = look.alphaMode === 'MASK' ? look.alphaCutoff : 0;
+}
+
+/** Every material property a glTF map slot fills. */
+const MAP_KEYS = [...new Set(MAP_SLOT_NAMES.flatMap((slot) => MAP_SLOTS[slot].maps))];
+
+/** What puts the file's own textures back when no preview stood in for any. */
+const NOTHING_SWAPPED = (): void => {};
+
+function isCompressed(texture: Texture): boolean {
+  return (texture as Texture & { isCompressedTexture?: boolean }).isCompressedTexture === true;
+}
+
+/**
+ * A copy of `original` showing the preview's pixels instead of its own. A KTX2
+ * preview is a compressed texture, a kind of its own, so it is the one copied
+ * and then set up as the original is; a web image only brings its pixels.
+ */
+function makeTwin(original: Texture, preview: Texture): Texture {
+  const twin = isCompressed(preview) ? preview.clone() : original.clone();
+  if (!isCompressed(preview)) twin.source = preview.source;
+  twin.needsUpdate = true;
+  return twin;
+}
+
+/** Keeps a stand-in set up as its original is, which edits go on changing. */
+function syncTwin(twin: Texture, original: Texture): void {
+  // A compressed texture brings its own mipmaps.
+  const mipmaps = !isCompressed(twin) && original.generateMipmaps;
+  // Sampling and colour space go with the upload, so only a real change uploads again.
+  if (
+    twin.wrapS !== original.wrapS ||
+    twin.wrapT !== original.wrapT ||
+    twin.magFilter !== original.magFilter ||
+    twin.minFilter !== original.minFilter ||
+    twin.anisotropy !== original.anisotropy ||
+    twin.colorSpace !== original.colorSpace ||
+    twin.generateMipmaps !== mipmaps
+  ) {
+    twin.wrapS = original.wrapS;
+    twin.wrapT = original.wrapT;
+    twin.magFilter = original.magFilter;
+    twin.minFilter = original.minFilter;
+    twin.anisotropy = original.anisotropy;
+    twin.colorSpace = original.colorSpace;
+    twin.generateMipmaps = mipmaps;
+    twin.needsUpdate = true;
+  }
+  twin.channel = original.channel;
+  twin.offset.copy(original.offset);
+  twin.repeat.copy(original.repeat);
+  twin.center.copy(original.center);
+  twin.rotation = original.rotation;
+  twin.matrixAutoUpdate = original.matrixAutoUpdate;
+  twin.matrix.copy(original.matrix);
+}
+
+/** Frees a preview's texture, and the bitmap holding its pixels outside the JS heap. */
+function releasePreview(preview: Texture): void {
+  preview.dispose();
+  const data: unknown = preview.image;
+  if (typeof ImageBitmap !== 'undefined' && data instanceof ImageBitmap) data.close();
 }
 
 /** glTF's sampler codes as three.js constants, the way GLTFLoader reads them. */

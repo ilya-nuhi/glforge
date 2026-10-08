@@ -2030,6 +2030,13 @@ body.scrubbing {
   color: var(--text-strong);
 }
 
+/* The preview's read-out, under its checkbox and lined up with the controls
+   as the precision's bits are: progress, then the textures' size change. */
+#compress-preview-status {
+  margin: -6px 0 10px 92px;
+  white-space: pre-line;
+}
+
 /* Narrow screens: the sidebar docks to the bottom, as in the editor. ----- */
 
 @media all and (max-width: 700px) {

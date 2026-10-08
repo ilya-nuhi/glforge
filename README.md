@@ -471,6 +471,14 @@ the places it keeps them:
   — three.js's own default — and the model's row has the same two boxes to set
   every mesh node in the file at once; while the nodes disagree, a box shows a
   dash, and a click sets them all
+- The row sets everything under it too: a node's sets every mesh node below it,
+  so ticking a character's root makes its body, hair and clothes all cast, and a
+  shape's or a group's sets the shapes hung under it. It only ever shows the
+  object's own two flags, so setting a child never changes what its parents
+  show. A group — a node with no mesh, or one of the scene's own groups — keeps
+  a pair of its own for this (a group node's in its extras, like a mesh node's),
+  and has no row when nothing under it draws. Lights under a group keep their
+  own **Cast**
 
 A node's two flags are the one part of this that goes into the file: glTF has
 no form for shadows, so they are kept in the node's `extras` — `castShadow` and
@@ -709,6 +717,18 @@ Draco dequantizes on its own and never touches a node.
   both sides to a multiple of 4, as `KHR_texture_basisu` requires, and halves
   anything over the encoder's 12-megapixel limit
 - Textures that are already KTX2 are left as they are
+
+**Preview: In viewport** shows the textures in the viewport as the download
+would carry them, before anything is downloaded. Every image a material shows is
+encoded with the current Textures, Quality and Max size choices, through the same
+encoder the download uses, and each replaces its original on screen as soon as
+it is done. Move the Quality slider and the preview follows once the slider
+rests. Under the checkbox is the textures' size before and after, plus any
+texture that would stay as it is, and why. The preview only changes what the
+viewport draws: edits still apply to the file's own textures, and unticking the
+box (or choosing **As is** for both Textures and Max size) puts the originals
+back. It starts unticked on every page load, since it encodes every texture.
+Geometry compression is not previewed.
 
 **Unused: Drop** removes meshes, materials, textures and skins nothing in the
 file uses, and merges identical textures and accessors. Nodes always stay, and

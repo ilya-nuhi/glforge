@@ -7,6 +7,9 @@
  * what the plain Download would write — every rename, move, delete, trim and
  * added image — and hands that to a worker, which returns a compressed .glb.
  * Nothing about the open document changes either way.
+ *
+ * Its preview shows the textures in the viewport as those choices would write
+ * them, made again as the choices change.
  */
 
 import {
@@ -20,8 +23,12 @@ import {
   type ImageBytes,
 } from './gltf';
 import { formatBytes } from './folder';
+import { MAP_SLOTS, getMaterialTexture } from './material';
 import { precisionPercent, quantizationBits, type Precision } from './precision';
 import { buildResourceLookup, resolveResource } from './resources';
+import { MAP_SLOT_NAMES, textureImage } from './texture';
+import type { TextureMode, TextureSettings, TextureUse } from './texture-encode';
+import type { PreviewImage, PreviewReply, PreviewRequest } from './texture-preview.worker';
 import type {
   CompressReply,
   CompressReport,
@@ -29,13 +36,13 @@ import type {
   CompressSettings,
   CompressSource,
   OutputFormat,
-  TextureMode,
 } from './compress.worker';
 
 /** What compressing needs from an open model. */
 export interface CompressModel {
   fileName: string;
   isGlb: boolean;
+  json: GltfJson;
   /** Its sidecars, which a .gltf's external references are read from. */
   resources: Map<string, File>;
 }
@@ -48,6 +55,15 @@ export interface CompressionHooks<M extends CompressModel> {
    * into keyframes — which is where a compressed one starts from too.
    */
   prepare: (model: M) => Promise<{ json: GltfJson; chunks: GlbChunk[] }>;
+  /**
+   * An image's bytes as the file holds them, read fresh for the caller to hand
+   * on; null when they are not to be had.
+   */
+  readImage: (model: M, image: number) => Promise<EncodedImage | null>;
+  /** Shows `encoded` in the viewport in place of one of the model's images, or the image itself again. */
+  showPreview: (model: M, image: number, encoded: EncodedImage | null) => Promise<void>;
+  /** Shows every one of the model's own images again. */
+  clearPreview: (model: M) => void;
   /** A choice changed, so what Download does — and what its button says — may have. */
   changed: () => void;
   flash: (message: string) => void;
@@ -64,6 +80,17 @@ export interface Compression<M extends CompressModel> {
   label: (model: M) => string | null;
   /** Downloads the model rewritten with the panel's choices. */
   download: (model: M) => Promise<void>;
+  /**
+   * The model the tabs are about, which the preview is of. Told again whenever
+   * it is edited: the preview is only made again if its images changed.
+   */
+  preview: (model: M | null) => void;
+}
+
+/** An image's bytes, on a buffer of their own that a worker can be handed. */
+export interface EncodedImage {
+  bytes: Uint8Array<ArrayBuffer>;
+  mimeType: string;
 }
 
 /**
@@ -136,6 +163,9 @@ const QUALITY: Record<
 /** How many skipped textures the status lists by name before summing up the rest. */
 const LISTED_SKIPS = 6;
 
+/** How long the choices rest before the preview is made again: a slider sends a stream. */
+const PREVIEW_DELAY = 250;
+
 function $<T extends HTMLElement = HTMLElement>(selector: string): T {
   const element = document.querySelector<T>(selector);
   if (!element) throw new Error(`Missing element: ${selector}`);
@@ -159,6 +189,8 @@ export function initCompression<M extends CompressModel>(hooks: CompressionHooks
   const rdo = $<HTMLInputElement>('#compress-rdo');
   const uastcNormals = $<HTMLInputElement>('#compress-uastc-normals');
   const maxSize = $<HTMLSelectElement>('#compress-max-size');
+  const previewBox = $<HTMLInputElement>('#compress-preview');
+  const previewStatus = $('#compress-preview-status');
   const pruneBox = $<HTMLInputElement>('#compress-prune');
   // The one Download button: the app starts it, the panel holds it while it works.
   const startBtn = $<HTMLButtonElement>('#export-btn');
@@ -215,6 +247,7 @@ export function initCompression<M extends CompressModel>(hooks: CompressionHooks
 
     hint.textContent = describe(settings);
     hooks.changed();
+    refreshPreview();
   }
 
   function update(): void {
@@ -268,6 +301,7 @@ export function initCompression<M extends CompressModel>(hooks: CompressionHooks
     const { key } = QUALITY[settings.textures];
     settings[key] = Number(quality.value);
     qualityValue.textContent = quality.value;
+    refreshPreview();
   });
   quality.addEventListener('change', () => saveSettings(settings));
 
@@ -343,6 +377,166 @@ export function initCompression<M extends CompressModel>(hooks: CompressionHooks
     if (job) finish(['Cancelled.']);
   });
 
+  // -------------------------------------------------------------------------
+  // Preview
+
+  /** Off with every page load: it encodes every texture, which nobody should meet unasked. */
+  let previewOn = false;
+  /** The model the tabs are about. */
+  let shownModel: M | null = null;
+  /**
+   * The model with previews in the viewport: what they were made from, and
+   * which of its images have one.
+   */
+  let previewed: { model: M; key: string; images: Set<number> } | null = null;
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
+  let previewJob: { worker: Worker | null } | null = null;
+
+  previewBox.addEventListener('change', () => {
+    previewOn = previewBox.checked;
+    refreshPreview();
+  });
+
+  /**
+   * Brings the preview in step with the choices and the model: made again once
+   * they have rested, or taken away when it is off or has nothing to show.
+   */
+  function refreshPreview(): void {
+    const model = previewOn && changesTextures(settings) ? shownModel : null;
+    if (previewed && previewed.model !== model) {
+      stopPreview();
+      hooks.clearPreview(previewed.model);
+      previewed = null;
+    }
+    if (!model) {
+      stopPreview();
+      // Ticked with every texture choice at As is: say what would give it something to show.
+      showPreviewStatus(
+        previewOn && !changesTextures(settings)
+          ? ['Preview: choose a Textures format or a Max size to see the textures as Download would write them.']
+          : [],
+      );
+      return;
+    }
+    const sources = previewSources(model);
+    const key = previewKey(sources, settings);
+    if (previewed?.key === key) return;
+    previewed = { model, key, images: previewed?.images ?? new Set() };
+    stopPreview();
+    previewTimer = setTimeout(() => void runPreview(model, sources), PREVIEW_DELAY);
+  }
+
+  function stopPreview(): void {
+    clearTimeout(previewTimer);
+    previewJob?.worker?.terminate();
+    previewJob = null;
+  }
+
+  function showPreviewStatus(lines: string[]): void {
+    previewStatus.textContent = lines.join('\n');
+    previewStatus.hidden = lines.length === 0;
+  }
+
+  /**
+   * Encodes every image a material shows and puts each on screen as it comes
+   * back. The previews of the last choices stay until theirs replace them, so
+   * the viewport never drops back to the originals in between.
+   */
+  async function runPreview(model: M, sources: PreviewSource[]): Promise<void> {
+    const job: { worker: Worker | null } = { worker: null };
+    previewJob = job;
+    const shown = previewed?.images ?? new Set<number>();
+    const unshow = (image: number): void => {
+      if (!shown.delete(image)) return;
+      hooks.showPreview(model, image, null).catch(() => {});
+    };
+    // An image no material shows any more goes back to itself.
+    const wanted = new Set(sources.map((source) => source.image));
+    for (const image of [...shown]) {
+      if (!wanted.has(image)) unshow(image);
+    }
+
+    const names = new Map(sources.map((source) => [source.image, source.name]));
+    const skipped: { name: string; reason: string }[] = [];
+    let total = 0;
+    let done = 0;
+    let before = 0;
+    let after = 0;
+    const paint = (): void => {
+      const lines =
+        total === 0
+          ? ['Preview: no texture to show.']
+          : done < total
+            ? [`Preview: ${done} of ${total} textures…`]
+            : [
+                `Preview: ${total} texture${total === 1 ? '' : 's'}, ${formatBytes(before)} → ${formatBytes(after)} (${sizeChange(before, after)})`,
+              ];
+      lines.push(...listSkipped(skipped));
+      showPreviewStatus(lines);
+    };
+    showPreviewStatus(['Preview: reading textures…']);
+
+    const images: PreviewImage[] = [];
+    for (const source of sources) {
+      let read: EncodedImage | null = null;
+      try {
+        read = await hooks.readImage(model, source.image);
+      } catch {
+        // Unreadable is as good as missing here.
+      }
+      if (previewJob !== job) return;
+      if (!read) {
+        skipped.push({ name: source.name, reason: 'its file is not supplied' });
+        unshow(source.image);
+        continue;
+      }
+      const { image, srgb, normal } = source;
+      images.push({ image, bytes: read.bytes, mimeType: read.mimeType, srgb, normal });
+    }
+    total = images.length;
+    paint();
+    if (total === 0) return;
+
+    // A worker of its own, apart from a download's, so either can be cancelled
+    // without the other.
+    const worker = new Worker(new URL('./texture-preview.worker.ts', import.meta.url), { type: 'module' });
+    job.worker = worker;
+    worker.addEventListener('message', (event: MessageEvent<PreviewReply>) => {
+      if (previewJob !== job) return;
+      const reply = event.data;
+      if (reply.type === 'done') {
+        worker.terminate();
+        job.worker = null;
+        return;
+      }
+      done++;
+      before += reply.before;
+      after += reply.after;
+      const name = names.get(reply.image) ?? `Image ${reply.image}`;
+      if (reply.skipped) skipped.push({ name, reason: reply.skipped });
+      if (reply.encoded) shown.add(reply.image);
+      else shown.delete(reply.image);
+      hooks.showPreview(model, reply.image, reply.encoded).catch((error: unknown) => {
+        // A newer preview may have the image by now; only this one's own failure counts.
+        if (previewJob !== job) return;
+        shown.delete(reply.image);
+        skipped.push({ name, reason: `the viewport could not show it (${messageOf(error)})` });
+        paint();
+      });
+      paint();
+    });
+    worker.addEventListener('error', (event) => {
+      if (previewJob !== job) return;
+      stopPreview();
+      showPreviewStatus([`Preview failed: ${event.message || 'the encoder failed to load'}`]);
+    });
+    const request: PreviewRequest = { images, settings: textureSettings(settings) };
+    worker.postMessage(
+      request,
+      images.map(({ bytes }) => bytes.buffer),
+    );
+  }
+
   render();
   return {
     active: (model) => needsWorker(settings, model),
@@ -352,7 +546,85 @@ export function initCompression<M extends CompressModel>(hooks: CompressionHooks
       return wantsReencode(settings) ? `Download compressed .${extension}` : `Download .${extension}`;
     },
     download: (model) => start(model),
+    preview: (model) => {
+      shownModel = model;
+      refreshPreview();
+    },
   };
+}
+
+/** Whether the choices would change a texture at all, which is what there is to preview. */
+function changesTextures(settings: CompressSettings): boolean {
+  return settings.textures !== 'keep' || settings.maxSize !== 0;
+}
+
+/** The choices encoding an image takes, apart from the rest of the panel's. */
+function textureSettings(settings: CompressSettings): TextureSettings {
+  const { textures, imageQuality, etc1sQuality, uastcLevel, uastcRdo, uastcNormals, maxSize } = settings;
+  return { textures, imageQuality, etc1sQuality, uastcLevel, uastcRdo, uastcNormals, maxSize };
+}
+
+/** An image some material shows, which the preview encodes. */
+interface PreviewSource extends TextureUse {
+  image: number;
+  name: string;
+  /** Where its bytes are, so a preview can tell when they are other bytes now. */
+  from: string;
+  file: File | null;
+}
+
+/**
+ * Every image a material shows, with what it is used as — read from every
+ * slot that holds it, as the compress worker reads it.
+ */
+function previewSources(model: CompressModel): PreviewSource[] {
+  const { json } = model;
+  const lookup = buildResourceLookup(model.resources);
+  const sources = new Map<number, PreviewSource>();
+  for (const material of json.materials ?? []) {
+    for (const slot of MAP_SLOT_NAMES) {
+      const texture = getMaterialTexture(material, slot)?.index;
+      const image = texture === undefined ? undefined : textureImage(json, texture);
+      const definition = image === undefined ? undefined : json.images?.[image];
+      if (image === undefined || !definition) continue;
+      let source = sources.get(image);
+      if (!source) {
+        const { uri } = definition;
+        const external = uri !== undefined && !uri.startsWith('data:');
+        source = {
+          image,
+          name: definition.name || (external ? uri : '') || `Image ${image}`,
+          // A data URI can run to megabytes; its length tells one from another well enough.
+          from: uri === undefined ? `view ${definition.bufferView}` : external ? uri : `data ${uri.length}`,
+          file: external ? (resolveResource(lookup, uri) ?? null) : null,
+          srgb: false,
+          normal: false,
+        };
+        sources.set(image, source);
+      }
+      source.srgb ||= MAP_SLOTS[slot].srgb;
+      source.normal ||= /normal/i.test(slot);
+    }
+  }
+  return [...sources.values()].sort((a, b) => a.image - b.image);
+}
+
+/** Tells apart the files a preview was read from, which a key cannot hold. */
+const fileIds = new WeakMap<File, number>();
+let nextFileId = 1;
+
+/** Everything a preview was made from: while it is the same, so is the preview. */
+function previewKey(sources: PreviewSource[], settings: CompressSettings): string {
+  const fileId = (file: File | null): number => {
+    if (!file) return 0;
+    let id = fileIds.get(file);
+    if (id === undefined) fileIds.set(file, (id = nextFileId++));
+    return id;
+  };
+  return JSON.stringify([
+    textureSettings(settings),
+    sources.map(({ image, from, file, srgb, normal }) => [image, from, fileId(file), srgb, normal]),
+  ]);
 }
 
 /**
@@ -415,17 +687,19 @@ function summarize(report: CompressReport, before: number, after: number): strin
     if (report.skipped.length > 0) parts.push(`${report.skipped.length} left as they were`);
     lines.push(`Textures: ${parts.join(', ')}`);
   }
-  for (const { name, reason } of report.skipped.slice(0, LISTED_SKIPS)) {
-    lines.push(`· ${name}: ${reason}`);
-  }
-  if (report.skipped.length > LISTED_SKIPS) {
-    lines.push(`· and ${report.skipped.length - LISTED_SKIPS} more`);
-  }
+  lines.push(...listSkipped(report.skipped));
   if (report.warnings.length > 0) {
     lines.push(
       `${report.warnings.length} warning${report.warnings.length === 1 ? '' : 's'} in the console`,
     );
   }
+  return lines;
+}
+
+/** Textures left as they were, by name up to a point, and why. */
+function listSkipped(skipped: { name: string; reason: string }[]): string[] {
+  const lines = skipped.slice(0, LISTED_SKIPS).map(({ name, reason }) => `· ${name}: ${reason}`);
+  if (skipped.length > LISTED_SKIPS) lines.push(`· and ${skipped.length - LISTED_SKIPS} more`);
   return lines;
 }
 

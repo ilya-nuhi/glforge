@@ -115,6 +115,7 @@ import {
   removeAnimation,
   removeMesh,
   removeNodes,
+  subtreeOf,
   type Collection,
   type Removal,
 } from './remove';
@@ -178,7 +179,7 @@ import type {
   TargetKind,
   Viewer,
 } from './viewer';
-import { initCompression, type Compression } from './compress';
+import { initCompression, type Compression, type EncodedImage } from './compress';
 import './style.css';
 
 /**
@@ -1043,6 +1044,7 @@ function renderActiveModel(): void {
   updateFileStats();
   renderFiles();
   scheduleViewSave();
+  refreshTexturePreview();
 }
 
 /** The menubar's right end: the active file, and which scene it is in once there are several. */
@@ -1196,6 +1198,7 @@ function buildEditor(): void {
   restoreCollapsed(collapsed);
 
   updateFileStats();
+  refreshTexturePreview();
   // Added images become files of their own, so the folder view moves with the
   // document as well as with what has been dropped in.
   renderFiles();
@@ -1934,6 +1937,15 @@ function noteEdit(model: Model): void {
   recordModelEdit(model);
   updateFileStats();
   scheduleDocSave(model);
+  refreshTexturePreview();
+}
+
+/**
+ * The Download panel previews the active model's textures, so it hears of
+ * every change that may have touched them. It works out itself whether one did.
+ */
+function refreshTexturePreview(): void {
+  compression?.preview(activeModel);
 }
 
 /** The File panel's "Contents" row: what the active file holds, and what was renamed. */
@@ -4258,6 +4270,8 @@ async function startViewer(model: Model, options: ViewerOptions = {}): Promise<v
     current.setExtraSelection(...extraParts());
     updateMoveButtons();
     updateMenus();
+    // Files supplied since may be the images the preview could not read before.
+    refreshTexturePreview();
     if (!propertiesEl.contains(document.activeElement)) rebuildProperties();
 
     // The viewport works in this case, so never cover it with a blocking
@@ -5617,8 +5631,10 @@ function buildPropertyPanel(model: Model, kind: TargetKind, index: number): HTML
     panel.append(valueRow('Children', String(node?.children?.length ?? 0), true));
     if (node?.mesh !== undefined) panel.append(linkRow(model, 'Mesh', 'mesh', node.mesh));
     if (node) for (const row of transformRows(model, index, node)) panel.append(row);
-    // The editor's Shadow row: only what draws something can throw or take one.
-    if (node?.mesh !== undefined) panel.append(nodeShadowRow(model, index));
+    // The editor's Shadow row: only what draws something can throw or take one —
+    // the node itself, or the nodes under it, which the row sets along with it.
+    const shadowRow = node ? nodeShadowRow(model, index) : null;
+    if (shadowRow) panel.append(shadowRow);
     // The object's tab speaks for the mesh it draws, its shape keys included.
     const morphs = node?.mesh !== undefined ? morphSection(model, index, node.mesh) : null;
     if (morphs) panel.append(morphs);
@@ -6131,9 +6147,14 @@ function buildObjectPanel(object: SceneObject): HTMLElement {
   if (object.penumbra !== undefined) {
     panel.append(amountRow('Penumbra', object, 'penumbra', 0.01, { min: 0, max: 1 }));
   }
-  // A shape has the editor's Shadow row; a light with a direction, a section of its own.
-  if (object.receiveShadow !== undefined) panel.append(objectShadowRow(object));
-  else if (object.castShadow !== undefined) panel.append(lightShadowSection(object));
+  // A light with a direction has a Shadow section of its own; a shape, or a
+  // group with shapes under it, the editor's Shadow row.
+  if (kind.category === 'light') {
+    if (object.castShadow !== undefined) panel.append(lightShadowSection(object));
+  } else {
+    const shadowRow = objectShadowRow(object);
+    if (shadowRow) panel.append(shadowRow);
+  }
 
   const shown = document.createElement('div');
   shown.className = 'Row';
@@ -6300,13 +6321,34 @@ function amountRow(
   return fieldRow(label, input);
 }
 
-/** A shape's Shadow row, for the scene's own objects. */
-function objectShadowRow(object: SceneObject): HTMLElement {
-  return shadowFlagsRow(
+/**
+ * A shape's Shadow row, for the scene's own objects, and a group's. Like a
+ * node's, it shows the object's own pair and sets every shape under the object
+ * along with it, so setting a shape below never changes what its parents show.
+ * Lights under it are left alone: a light's Cast is a section of its own, and
+ * means something else. A group with no shape under it has no row.
+ */
+function objectShadowRow(object: SceneObject): HTMLElement | null {
+  const below = shapesBelow(object);
+  if (categoryOf(object.kind) !== 'mesh' && below.length === 0) return null;
+  const row = shadowFlagsRow(
     { cast: object.castShadow === true, receive: object.receiveShadow === true },
     `object-${object.id}`,
-    (flag, on) => setObjectProp(object, flag === 'cast' ? 'castShadow' : 'receiveShadow', on),
+    (flag, on) => {
+      const key = flag === 'cast' ? 'castShadow' : 'receiveShadow';
+      for (const target of [object, ...shapesBelow(object)]) target[key] = on;
+      viewer?.syncObjects(sceneObjects);
+      noteSceneEdit();
+    },
   );
+  if (below.length > 0) row.title = `Sets this object and the ${plural(below.length, 'shape')} under it`;
+  return row;
+}
+
+/** Every shape anywhere under the object. */
+function shapesBelow(object: SceneObject): SceneObject[] {
+  const under = descendantsOf(sceneObjects, object.id);
+  return sceneObjects.filter((candidate) => under.has(candidate.id) && categoryOf(candidate.kind) === 'mesh');
 }
 
 /**
@@ -7369,15 +7411,40 @@ function imagePreviewUrl(model: Model, imageIndex: number): Promise<string | nul
  * a data URI, in a file the user supplied, or inside the binary chunk.
  */
 function buildImageUrl(model: Model, imageIndex: number): string | null {
+  const image = model.json.images?.[imageIndex];
+  if (!image || !isDisplayableImage(image)) return null;
+  if (image.uri?.startsWith('data:')) return image.uri;
+  const blob = imageBlob(model, imageIndex);
+  return blob ? URL.createObjectURL(blob) : null;
+}
+
+/**
+ * A glTF image's bytes, wherever they live, for the Download panel's preview
+ * to encode: a copy of their own, which it hands on to a worker.
+ */
+async function readImageBytes(model: Model, imageIndex: number): Promise<EncodedImage | null> {
+  const image = model.json.images?.[imageIndex];
+  if (!image) return null;
+  const blob = image.uri?.startsWith('data:')
+    ? await (await fetch(image.uri)).blob()
+    : imageBlob(model, imageIndex);
+  if (!blob) return null;
+  return {
+    bytes: new Uint8Array(await blob.arrayBuffer()),
+    // A file the user supplied may say nothing; its extension still does.
+    mimeType: image.mimeType || (blob instanceof File ? mimeTypeOf(blob) : blob.type) || 'image/png',
+  };
+}
+
+/**
+ * Where an image's bytes are, short of a data URI: a file the user supplied, or
+ * a stretch of a buffer. Null when that is not to be had.
+ */
+function imageBlob(model: Model, imageIndex: number): Blob | null {
   const { json, resources } = model;
   const image = json.images?.[imageIndex];
-  if (!image || !isDisplayableImage(image)) return null;
-
-  if (image.uri) {
-    if (image.uri.startsWith('data:')) return image.uri;
-    const file = resolveResource(buildResourceLookup(resources), image.uri);
-    return file ? URL.createObjectURL(file) : null;
-  }
+  if (!image) return null;
+  if (image.uri) return resolveResource(buildResourceLookup(resources), image.uri) ?? null;
 
   const range = imageBufferRange(json, imageIndex);
   if (!range) return null;
@@ -7388,13 +7455,11 @@ function buildImageUrl(model: Model, imageIndex: number): string | null {
   if (buffer?.uri === undefined) {
     const bin = model.isGlb ? model.glbChunks.find((chunk) => chunk.type === CHUNK_BIN) : undefined;
     if (!bin || range.end > bin.data.byteLength) return null;
-    return URL.createObjectURL(
-      new Blob([bin.data.subarray(range.start, range.end)], { type: range.mimeType }),
-    );
+    return new Blob([bin.data.subarray(range.start, range.end)], { type: range.mimeType });
   }
   const file = resolveResource(buildResourceLookup(resources), buffer.uri);
   if (!file || range.end > file.size) return null;
-  return URL.createObjectURL(file.slice(range.start, range.end, range.mimeType));
+  return file.slice(range.start, range.end, range.mimeType);
 }
 
 /** Compressed textures are not something a browser will decode in an <img>. */
@@ -8420,16 +8485,31 @@ function visibleRow(model: Model, kind: TargetKind | null, index: number): HTMLE
 }
 
 /**
- * The editor's Shadow row for a mesh node: whether it throws a shadow and
- * whether one falls on it. Kept in the node's extras, so it goes into the file.
+ * The editor's Shadow row for a node: whether it throws a shadow and whether one
+ * falls on it, as the node itself is set. Ticking it sets the node and every
+ * node under it that draws a mesh, so ticking a character's root sets its body,
+ * hair and clothes alike — but it only ever shows the node's own pair, so
+ * setting a node below never changes what its parents show. A group node keeps
+ * a pair of its own for this; one with no mesh anywhere below has no row. Kept
+ * in each node's extras, so it goes into the file.
  */
-function nodeShadowRow(model: Model, index: number): HTMLElement {
-  const node = model.json.nodes?.[index];
-  const row = shadowFlagsRow(readShadowFlags(node?.extras), `${model.id}-node-${index}`, (flag, on) => {
-    if (!node) return;
-    if (applyNodeShadow(model, index, { ...readShadowFlags(node.extras), [flag]: on })) noteEdit(model);
+function nodeShadowRow(model: Model, index: number): HTMLElement | null {
+  const nodes = model.json.nodes ?? [];
+  const node = nodes[index];
+  if (!node) return null;
+  const below = [...subtreeOf(nodes, [index])].filter((at) => at !== index && nodes[at].mesh !== undefined);
+  if (node.mesh === undefined && below.length === 0) return null;
+  const row = shadowFlagsRow(readShadowFlags(node.extras), `${model.id}-node-${index}`, (flag, on) => {
+    let changed = false;
+    for (const at of [index, ...below]) {
+      if (applyNodeShadow(model, at, { ...readShadowFlags(nodes[at].extras), [flag]: on })) changed = true;
+    }
+    if (changed) noteEdit(model);
   });
-  row.title = 'Saved in the node’s extras as castShadow / receiveShadow';
+  row.title =
+    below.length === 0
+      ? 'Saved in the node’s extras as castShadow / receiveShadow'
+      : `Sets this node and the ${plural(below.length, 'node')} under it with a mesh — saved in each one’s extras`;
   return row;
 }
 
@@ -9451,6 +9531,14 @@ exportBtn.addEventListener('click', () => void exportModel());
 compression = initCompression<Model>({
   readAddedImages,
   prepare: withBakedTrims,
+  readImage: readImageBytes,
+  // A model whose data is not all there yet has no viewer to wait for, so one
+  // is started: the preview is kept in it for when the model comes in.
+  showPreview: async (model, image, encoded) => {
+    const current = await ensureViewer();
+    await current.previewImage(model.id, image, encoded);
+  },
+  clearPreview: (model) => viewer?.clearImagePreviews(model.id),
   changed: renderDownload,
   flash: showFlash,
 });

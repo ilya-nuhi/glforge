@@ -124,7 +124,14 @@ const LIGHT_SHADOW: SceneObjectProps = {
 };
 
 export const SCENE_OBJECT_KINDS: Record<SceneObjectKind, KindSpec> = {
-  group: { label: 'Group', name: 'Group', category: 'group', position: [0, 0, 0], props: {} },
+  group: {
+    label: 'Group',
+    name: 'Group',
+    category: 'group',
+    position: [0, 0, 0],
+    // A group draws nothing; its pair is what its Shadow row last set on the shapes under it.
+    props: { castShadow: false, receiveShadow: false },
+  },
   box: {
     label: 'Box',
     name: 'Box',
