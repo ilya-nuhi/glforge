@@ -482,12 +482,24 @@ body.dragover #dropzone .dropzone-title {
 
 /* Toolbar ---------------------------------------------------------------- */
 
-#toolbar {
+/* The toolbar, centred on the viewport's bottom edge. Only the bar itself takes
+   the pointer; around it is viewport. */
+#viewport-bars {
   position: absolute;
   left: calc((100% - var(--sidebar-width)) / 2);
   transform: translateX(-50%);
   bottom: 20px;
   max-width: calc(100% - var(--sidebar-width) - 24px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+#toolbar {
+  max-width: 100%;
   min-height: 32px;
   flex-wrap: wrap;
   justify-content: center;
@@ -498,7 +510,7 @@ body.dragover #dropzone .dropzone-title {
   border: 3px solid var(--bar);
   border-radius: 6px;
   overflow: hidden;
-  z-index: 1;
+  pointer-events: auto;
 }
 
 #toolbar .Button {
@@ -549,10 +561,41 @@ body.resizing {
   overflow-x: hidden;
 }
 
-#tabs {
+/* The scene picker and the tabs stay in view together as the sidebar scrolls. */
+#sidebar-head {
   position: sticky;
   top: 0;
   z-index: 1;
+}
+
+#scene-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background-color: var(--bar);
+  border-bottom: 1px solid var(--line);
+}
+
+#scene-switch,
+#scene-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+}
+
+/* A scene's name is the user's, so it is shown as typed rather than in capitals. */
+#scene-switch {
+  text-transform: none;
+  color: var(--text-strong);
+}
+
+.scene-btn {
+  flex: none;
+  height: 24px;
+}
+
+#tabs {
   display: flex;
   background-color: var(--tabs);
   border-bottom: 1px solid var(--line);
@@ -642,6 +685,22 @@ body.resizing {
   gap: 4px;
 }
 
+/* Several checkboxes in one row, each with its word: the editor's "cast / receive". */
+.Row .checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+}
+
+.Row .checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
 .note {
   margin: 10px 0 0;
   font-size: 11px;
@@ -696,6 +755,21 @@ body.resizing {
 
 .row.selected {
   background-color: var(--select);
+}
+
+/* The rest of a multiple selection: picked too, a shade under the one the
+   panel shows, the way Blender lights its active object brighter. */
+.row.selected.selected-extra {
+  background-color: rgb(21 60 94 / 0.7);
+}
+
+#multi-note {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text);
+  background-color: var(--bar);
+  border-top: 1px solid var(--line);
 }
 
 .row.highlight {
@@ -894,6 +968,22 @@ select.row-chip {
   color: var(--text-dim);
 }
 
+/* The Scene row names nothing in any file, so its name is a label rather than a
+   field — set in the same box a row's field takes, so it lines up with them. */
+.row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 5px;
+  font-size: 12px;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row.scene-root {
+  cursor: default;
+}
+
 .row-chip .type-icon,
 .row-aside > .type-icon {
   width: 12px;
@@ -954,6 +1044,10 @@ select.row-chip {
   color: #eeaaee;
 }
 
+.type-icon[data-icon='morph'] {
+  color: #eebb77;
+}
+
 .type-icon[data-icon='texture'],
 .type-icon[data-icon='image'] {
   color: #88dddd;
@@ -986,6 +1080,104 @@ select.row-chip {
 
 .type-icon[data-icon='file'] {
   color: #888888;
+}
+
+/* The scene's own lights share the light colour, one glyph per kind. */
+.type-icon[data-icon='lightAmbient'],
+.type-icon[data-icon='lightDirectional'],
+.type-icon[data-icon='lightHemisphere'],
+.type-icon[data-icon='lightSpot'] {
+  color: #dddd88;
+}
+
+/* Adding to the scene -------------------------------------------------------- */
+
+/* The outliner's "+", at the end of the filter row: square, so it reads as the
+   editor's icon buttons do rather than as one more word. */
+.add-btn {
+  flex: none;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* Fixed rather than absolute, and placed in script beside the button: the
+   sidebar scrolls and clips, and the list is taller than the room above the
+   outliner. It looks like a menubar menu, since it is one. */
+.Dropdown {
+  position: fixed;
+  z-index: 5;
+  min-width: 190px;
+  padding: 5px 0;
+  overflow: auto;
+  background: var(--bar);
+  box-shadow: 0 10px 10px -5px #00000066, 0 0 0 1px var(--line);
+}
+
+.Dropdown .heading {
+  padding: 8px 10px 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.Dropdown .option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.Dropdown .option:hover,
+.Dropdown .option:focus-visible {
+  color: #fff;
+  background-color: var(--accent);
+  outline: none;
+}
+
+.Dropdown .option:hover .type-icon,
+.Dropdown .option:focus-visible .type-icon,
+#menubar .menu .options .option:hover .type-icon {
+  color: #fff;
+}
+
+/* The menubar's Add menu lists the same glyphs, inline with the text. */
+#menubar .menu .options .option .type-icon {
+  display: inline-grid;
+  vertical-align: -2px;
+  margin-right: 8px;
+}
+
+/* A light's amounts are short numbers; stretched across the row they would read
+   as text fields. */
+.Row > .Input.Number {
+  flex: none;
+  width: 6em;
+}
+
+input[type='color'].Color {
+  width: 44px;
+  height: 22px;
+  padding: 0 2px;
+  background: var(--field);
+  border: 1px solid var(--field);
+  cursor: pointer;
+}
+
+input[type='color'].Color:hover {
+  border-color: var(--field-hover);
 }
 
 /* Row buttons ------------------------------------------------------------ */
@@ -1223,6 +1415,153 @@ select.row-chip {
   color: var(--danger);
 }
 
+/* Animations tab --------------------------------------------------------- */
+
+/* A handful of clips is the usual, so like the file tree it grows to fit, then
+   scrolls. */
+.ClipList {
+  height: auto;
+  max-height: clamp(140px, 36vh, 520px);
+}
+
+.ClipList ul {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+}
+
+.clip-row {
+  display: grid;
+  grid-template-columns: 2.2em 18px minmax(0, 1fr) auto;
+  align-items: center;
+  padding-right: 6px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.clip-row:hover {
+  background-color: var(--select-soft);
+}
+
+.clip-row.selected {
+  background-color: var(--select);
+}
+
+/* Rows are tab stops, so the keyboard has to be visible on them. */
+.clip-row:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.clip-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px 4px;
+}
+
+.clip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-strong);
+}
+
+.clip-name.unnamed {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Renamed reads the way a renamed outliner row does. */
+.clip-row.modified .clip-name {
+  color: var(--accent);
+}
+
+.clip-length {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* The ▶ is what the row is for, so it is never as quiet as the outliner's
+   hover buttons. */
+.clip-row .row-btn {
+  opacity: 0.7;
+}
+
+.clip-row:hover .row-btn,
+.clip-row:focus-within .row-btn,
+.clip-row.selected .row-btn {
+  opacity: 1;
+}
+
+.clip-row.playing .clip-play {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.clip-row .row-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+/* Wide enough for "Pause" as well, so the buttons do not jump when it plays. */
+#play-btn {
+  min-width: 56px;
+}
+
+#clip-scrubber {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#clip-scrubber:disabled {
+  cursor: default;
+}
+
+/* The time changes every frame; fixed-width digits stop it wobbling. */
+#clip-time {
+  flex: none;
+  min-width: 8.5em;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text-strong);
+}
+
+.speed-field {
+  display: flex;
+  align-items: center;
+}
+
+.speed-field .Input.Number {
+  width: 5em;
+}
+
+/* A trimmed clip's length is its stretch, not the whole: blue, like any change. */
+.clip-row.trimmed .clip-length {
+  color: var(--accent);
+}
+
+.trim-fields {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.trim-fields .Input.Number {
+  width: 5em;
+}
+
+.trim-sep {
+  color: var(--text-dim);
+}
+
 /* Properties ------------------------------------------------------------- */
 
 .TabbedPanel {
@@ -1315,6 +1654,107 @@ body.scrubbing {
   text-transform: none;
 }
 
+/* Material parameters ---------------------------------------------------- */
+
+/* A shader material's source: code, so monospaced, unwrapped and resizable. */
+.Input.code {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+.Row:has(> .Input.code) {
+  align-items: flex-start;
+}
+
+/* Class names read as written: MESHPHYSICALMATERIAL is one word too many. */
+.Select.material-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-transform: none;
+}
+
+/* A physical extension's rows, folded under its name while it is unused. */
+.material-section {
+  margin: 0 0 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.material-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.material-section:not([open]) > summary {
+  margin-bottom: 0;
+}
+
+.material-section > summary:hover {
+  color: var(--text);
+}
+
+/* The material uses it: it is in the file, not just a folded-away default. */
+.material-section > summary.in-use {
+  color: var(--text);
+}
+
+.material-section > summary.in-use::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* A morph target a row: its name, a slider and the exact weight. Names are the
+   file's own and often long, so they are cut short rather than wrapped. */
+.morph-row .Label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.morph-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.morph-row > .Input.Number {
+  width: 4.5em;
+}
+
+/* In a model's morph targets tab each section is headed by whose they are: a
+   name from the file, so it keeps its own capitalisation. */
+.morph-section.named > summary {
+  font-size: 12px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text);
+}
+
+/* The chip beside an outliner row: how many targets its mesh has. */
+.morph-chip .row-chip-name {
+  font-family: var(--mono);
+}
+
 /* Material texture slots ------------------------------------------------- */
 
 .texture-row .Select {
@@ -1334,6 +1774,15 @@ body.scrubbing {
   background: #191919;
   border: 1px solid var(--line);
   overflow: hidden;
+  /* A button, which opens the file dialog: none of the browser's own look. */
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.thumb:hover,
+.thumb.empty:hover {
+  border-color: var(--accent);
 }
 
 .thumb img {
@@ -1361,6 +1810,144 @@ body.scrubbing {
 
 .texture-row.drop-target .thumb {
   border-color: var(--accent);
+}
+
+/* The editor's button beside a map, opening the texture's parameters. */
+.texture-edit {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+
+.texture-edit svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Texture parameters dialog --------------------------------------------- */
+
+.texture-dialog {
+  width: min(660px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bar);
+  border: 1px solid #333;
+  box-shadow: 0 10px 30px #000a;
+}
+
+/* Light, so the viewport behind still shows what the dialog is doing. */
+.texture-dialog::backdrop {
+  background: rgb(0 0 0 / 0.25);
+}
+
+.texture-dialog > h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: normal;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+
+.texture-dialog-subtitle {
+  margin: 4px 0 14px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.texture-dialog-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 20px;
+}
+
+@media (max-width: 640px) {
+  .texture-dialog-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.texture-dialog-section {
+  margin-bottom: 10px;
+}
+
+.texture-dialog-section > h3 {
+  margin: 0 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #333;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.texture-dialog .Row {
+  margin-bottom: 8px;
+}
+
+.texture-dialog .Row .Label {
+  width: 110px;
+}
+
+.texture-dialog .Row .Select {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.texture-dialog .Row .Select:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.texture-dialog .vector-row .vector {
+  flex: 0 1 13em;
+}
+
+/* One unit of UV space, over a checkerboard so transparency reads as such. */
+.texture-preview canvas {
+  display: block;
+  width: 256px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  background: repeating-conic-gradient(#2a2a2a 0 25%, #1e1e1e 0 50%) 0 0 / 16px 16px;
+}
+
+.texture-preview.unknown canvas {
+  background: #191919;
+}
+
+.texture-preview .note {
+  margin-top: 6px;
+  color: var(--text-dim);
+}
+
+.texture-dialog-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 16px;
+  margin-top: 6px;
+}
+
+.texture-dialog-footer .note {
+  flex: 1 1 auto;
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.texture-dialog-footer .Button {
+  min-width: 80px;
 }
 
 /* A reload that only changes materials keeps the viewport usable, so it says
@@ -1403,6 +1990,46 @@ body.scrubbing {
   margin: 0 0 14px;
 }
 
+/* Compress panel --------------------------------------------------------- */
+
+.compress-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+#compress-quality,
+.compress-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Up to "100%"; fixed width so the slider does not shift under the thumb. */
+.compress-value {
+  flex: none;
+  min-width: 4ch;
+  text-align: right;
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+/* What the precision works out to, tucked under its row and lined up with the
+   controls rather than the label. */
+.compress-bits {
+  margin: -6px 0 10px 92px;
+}
+
+/* The status is a few short lines: the size change, then what happened. */
+#compress-status {
+  white-space: pre-line;
+  color: var(--text-strong);
+}
+
 /* Narrow screens: the sidebar docks to the bottom, as in the editor. ----- */
 
 @media all and (max-width: 700px) {
@@ -1433,7 +2060,7 @@ body.scrubbing {
     border-top: 1px solid var(--line);
   }
 
-  #toolbar {
+  #viewport-bars {
     left: 50%;
     bottom: 10px;
   }

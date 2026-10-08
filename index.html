@@ -25,19 +25,27 @@
         <div class="options">
           <div class="option" data-action="open">Open file…</div>
           <div class="option" data-action="open-folder">Open folder…</div>
+          <div class="option" data-action="import-scene">Import studio scene…</div>
+          <hr />
+          <div class="option" data-action="new-scene">New scene</div>
+          <div class="option" data-action="rename-scene">Rename scene…</div>
+          <div class="option" data-action="delete-scene">Delete scene</div>
           <hr />
           <div class="option" data-action="download">Download<span class="key">Ctrl+S</span></div>
           <div class="option" data-action="reset">Reset names</div>
           <div class="option" data-action="reset-all">Reset all changes</div>
           <hr />
           <div class="option" data-action="close">Close</div>
+          <div class="option" data-action="close-all">Close all</div>
         </div>
       </div>
 
       <div class="menu">
         <div class="title">Edit</div>
         <div class="options">
-          <div class="option" data-action="undo">Undo replace<span class="key">Ctrl+Z</span></div>
+          <div class="option" data-action="undo">Undo<span class="key">Ctrl+Z</span></div>
+          <div class="option" data-action="redo">Redo<span class="key">Ctrl+Y</span></div>
+          <div class="option" data-action="delete">Delete<span class="key">Del</span></div>
           <hr />
           <div class="option" data-action="find">Find &amp; replace…</div>
           <div class="option" data-action="filter">Filter names…</div>
@@ -61,8 +69,17 @@
           <div class="option" data-action="isolate">Isolate selection</div>
           <div class="option" data-action="show-all">Show all</div>
           <hr />
+          <div class="option" data-action="play">Play animation<span class="key">Space</span></div>
+          <div class="option" data-action="stop">Stop animation</div>
+          <hr />
           <div class="option" data-action="collapse">Collapse all</div>
         </div>
+      </div>
+
+      <div class="menu">
+        <div class="title">Add</div>
+        <!-- Filled from scene.ts's ADD_MENU, like the outliner's "+". -->
+        <div class="options" id="menubar-add"></div>
       </div>
 
       <div class="menu">
@@ -84,7 +101,8 @@
         <div class="dropzone-inner">
           <div class="dropzone-icon" aria-hidden="true">📦</div>
           <p class="dropzone-title">
-            Drop a <strong>.glb</strong>, a <strong>.gltf</strong>, or its whole folder here
+            Drop a <strong>.glb</strong>, a <strong>.gltf</strong>, or its whole folder here —
+            as many models as you like
           </p>
           <p class="dropzone-text">
             Rename scenes, nodes, meshes, materials, animations &amp; more inside
@@ -97,7 +115,8 @@
           </p>
           <p class="dropzone-hint">
             Drop the folder to bring the <code>.bin</code> and textures along, so the
-            preview shows the model exactly as it is.
+            preview shows the model exactly as it is. Drop another model any time to add it
+            to the scene — or start from an empty one with <strong>+</strong> in the Scene tab.
           </p>
         </div>
       </div>
@@ -116,57 +135,86 @@
       <div id="flash" role="status" aria-live="polite" hidden></div>
     </div>
 
-    <div id="toolbar" hidden>
-      <button
-        id="move-btn"
-        class="Button selected"
-        type="button"
-        aria-pressed="true"
-        title="Move the selected node (W)"
-      >
-        Move
-      </button>
-      <button id="rotate-btn" class="Button" type="button" aria-pressed="false" title="Rotate the selected node (E)">
-        Rotate
-      </button>
-      <button id="scale-btn" class="Button" type="button" aria-pressed="false" title="Scale the selected node (R)">
-        Scale
-      </button>
-      <button id="space-btn" class="Button" type="button" title="Drag along world or local axes">
-        World
-      </button>
-      <span class="toolbar-sep" aria-hidden="true"></span>
-      <button id="frame-btn" class="Button" type="button" title="Frame everything (F)">Frame</button>
-      <button id="isolate-btn" class="Button" type="button" title="Show only the selection" hidden>
-        Isolate
-      </button>
-      <button id="show-all-btn" class="Button" type="button" hidden>Show all</button>
-      <button
-        id="grid-btn"
-        class="Button selected"
-        type="button"
-        aria-pressed="true"
-        title="Toggle the ground grid"
-      >
-        Grid
-      </button>
+    <div id="viewport-bars">
+      <div id="toolbar" hidden>
+        <button
+          id="move-btn"
+          class="Button selected"
+          type="button"
+          aria-pressed="true"
+          title="Move the selected node (W)"
+        >
+          Move
+        </button>
+        <button id="rotate-btn" class="Button" type="button" aria-pressed="false" title="Rotate the selected node (E)">
+          Rotate
+        </button>
+        <button id="scale-btn" class="Button" type="button" aria-pressed="false" title="Scale the selected node (R)">
+          Scale
+        </button>
+        <button id="space-btn" class="Button" type="button" title="Drag along world or local axes">
+          World
+        </button>
+        <span class="toolbar-sep" aria-hidden="true"></span>
+        <button id="frame-btn" class="Button" type="button" title="Frame everything (F)">Frame</button>
+        <button id="isolate-btn" class="Button" type="button" title="Show only the selection" hidden>
+          Isolate
+        </button>
+        <button id="show-all-btn" class="Button" type="button" hidden>Show all</button>
+        <button
+          id="grid-btn"
+          class="Button selected"
+          type="button"
+          aria-pressed="true"
+          title="Toggle the ground grid"
+        >
+          Grid
+        </button>
+      </div>
     </div>
 
     <div id="resizer"></div>
 
     <!-- Sidebar ---------------------------------------------------------- -->
     <div id="sidebar">
-      <div id="tabs" role="tablist">
-        <span data-tab="scene" class="selected" role="tab" tabindex="0">Scene</span>
-        <span data-tab="files" role="tab" tabindex="0">Files</span>
-        <span data-tab="tools" role="tab" tabindex="0">Tools</span>
+      <div id="sidebar-head">
+        <!-- The scene being worked in; every tab below is about it. -->
+        <div id="scene-bar">
+          <select id="scene-switch" class="Select" aria-label="Scene to work in"></select>
+          <input
+            id="scene-name-input"
+            class="Input"
+            type="text"
+            aria-label="Scene name"
+            spellcheck="false"
+            hidden
+          />
+          <button id="scene-rename-btn" class="Button scene-btn" type="button" title="Rename this scene">
+            Rename
+          </button>
+          <button id="scene-new-btn" class="Button scene-btn add-btn" type="button" title="New scene">+</button>
+          <button
+            id="scene-delete-btn"
+            class="Button scene-btn add-btn"
+            type="button"
+            aria-label="Delete this scene"
+          >
+            ×
+          </button>
+        </div>
+        <div id="tabs" role="tablist">
+          <span data-tab="scene" class="selected" role="tab" tabindex="0">Scene</span>
+          <span data-tab="animations" role="tab" tabindex="0">Animations</span>
+          <span data-tab="files" role="tab" tabindex="0">Files</span>
+          <span data-tab="tools" role="tab" tabindex="0">Tools</span>
+        </div>
       </div>
 
       <div id="tab-scene" class="tab-panel" role="tabpanel">
         <div class="Panel">
           <div class="Row" id="scene-row" hidden>
-            <span class="Label">Scene</span>
-            <select id="scene-select" class="Select" aria-label="Scene to preview"></select>
+            <span class="Label">glTF scene</span>
+            <select id="scene-select" class="Select" aria-label="Which of the file's scenes to show"></select>
           </div>
           <div class="Row">
             <span class="Label">Filter</span>
@@ -177,16 +225,127 @@
               placeholder="Name…"
               aria-label="Filter names"
             />
+            <button
+              id="add-btn"
+              class="Button add-btn"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="add-options"
+              title="Add a group, a shape or a light to the scene"
+            >
+              +
+            </button>
           </div>
         </div>
+        <!-- Filled from scene.ts's ADD_MENU, like the menubar's Add menu. -->
+        <div id="add-options" class="Dropdown" role="menu" aria-label="Add to the scene" hidden></div>
 
         <div id="outliner" class="Outliner"></div>
 
+        <p id="multi-note" hidden></p>
         <div id="properties" class="TabbedPanel"></div>
+      </div>
+
+      <div id="tab-animations" class="tab-panel" role="tabpanel" hidden>
+        <div class="Panel">
+          <div class="Row" id="animations-model-row" hidden>
+            <span class="Label">Model</span>
+            <select
+              id="animations-model-select"
+              class="Select"
+              aria-label="Which open model's animations to show"
+            ></select>
+          </div>
+          <div class="Row">
+            <span class="Label">Animations</span>
+            <span id="animations-summary" class="Value">—</span>
+          </div>
+        </div>
+
+        <div id="clip-list" class="Outliner ClipList"></div>
+
+        <div class="Panel" id="playback-panel" hidden>
+          <h2 class="PanelTitle">Playback</h2>
+          <div class="Row">
+            <span class="Label"></span>
+            <span class="Buttons">
+              <button id="play-btn" class="Button" type="button" title="Play the animation (Space)">
+                Play
+              </button>
+              <button
+                id="stop-btn"
+                class="Button"
+                type="button"
+                title="Stop, and put the model back the way the file poses it"
+              >
+                Stop
+              </button>
+              <button
+                id="reverse-btn"
+                class="Button"
+                type="button"
+                aria-pressed="false"
+                title="Play backwards, from the end towards the start"
+              >
+                Reverse
+              </button>
+              <button
+                id="loop-btn"
+                class="Button selected"
+                type="button"
+                aria-pressed="true"
+                title="Start the animation over when it reaches its end"
+              >
+                Loop
+              </button>
+            </span>
+          </div>
+          <div class="Row">
+            <span class="Label">Time</span>
+            <input
+              id="clip-scrubber"
+              type="range"
+              min="0"
+              max="0"
+              step="any"
+              value="0"
+              aria-label="Animation time"
+            />
+            <span id="clip-time">0.00 / 0.00 s</span>
+          </div>
+          <div class="Row">
+            <span class="Label">Speed</span>
+            <span id="speed-field" class="speed-field"></span>
+          </div>
+        </div>
+
+        <div class="Panel" id="clip-panel" hidden></div>
+
+        <div class="Panel">
+          <p class="note">
+            Click an animation to pick it, and its ▶ to play or pause it. Double-click one to
+            rename it. <kbd>Space</kbd> plays and pauses from anywhere. Speed, Reverse and Loop
+            apply to every open model. Playing is preview-only and never changes the file.
+          </p>
+          <p class="note">
+            <strong>Copy</strong> an animation and <strong>Trim</strong> the copy to cut a clip
+            out of a longer one. The preview plays a trim straight away; the download gets it as
+            new keyframes starting at 0, and the file's own keyframes are left as they are.
+          </p>
+        </div>
       </div>
 
       <div id="tab-files" class="tab-panel" role="tabpanel" hidden>
         <div class="Panel">
+          <div class="Row" id="files-model-row" hidden>
+            <span class="Label">Model</span>
+            <select
+              id="files-model-select"
+              class="Select"
+              aria-label="Which open model's files to show"
+            ></select>
+          </div>
           <div class="Row">
             <span class="Label">Folder</span>
             <span id="files-summary" class="Value">—</span>
@@ -266,6 +425,14 @@
 
         <div class="Panel">
           <h2 class="PanelTitle">File</h2>
+          <div class="Row" id="tools-model-row" hidden>
+            <span class="Label">Model</span>
+            <select
+              id="tools-model-select"
+              class="Select"
+              aria-label="Which open model to download, reset or close"
+            ></select>
+          </div>
           <div class="Row">
             <span class="Label">Name</span>
             <span id="file-name" class="Value">—</span>
@@ -277,7 +444,6 @@
           <div class="Row">
             <span class="Label"></span>
             <span class="Buttons">
-              <button id="export-btn" class="Button primary" type="button">Download</button>
               <button
                 id="reset-btn"
                 class="Button"
@@ -297,17 +463,166 @@
               <button id="close-btn" class="Button" type="button">Close</button>
             </span>
           </div>
-          <p id="gltf-note" class="note" hidden>
-            External references (<code>.bin</code> / textures) are kept as-is — the exported
-            <code>.gltf</code> drops right back into your project next to your existing files.
-          </p>
           <p class="note">
             Renaming is safe for animations, skinning and materials: glTF links those by index,
             never by name.
           </p>
           <p class="note">
-            This file and your changes are kept in this browser, so a reload picks up where you
-            left off. Nothing is uploaded; <strong>Close</strong> clears it.
+            The open files and your changes are kept in this browser, so a reload picks up where
+            you left off. Nothing is uploaded; <strong>Close</strong> clears the file above, and
+            <strong>File → Close all</strong> every one of them.
+          </p>
+        </div>
+
+        <div class="Panel" id="compress-panel">
+          <h2 class="PanelTitle">Download</h2>
+          <div class="Row">
+            <span class="Label">Format</span>
+            <select
+              id="compress-format"
+              class="Select"
+              aria-label="File format"
+              title="The kind of file Download writes"
+            >
+              <option value="keep">As is</option>
+              <option value="glb">.glb</option>
+              <option value="gltf-zip">.gltf + files (.zip)</option>
+              <option value="gltf-embedded">.gltf, embedded</option>
+            </select>
+          </div>
+          <div class="Row">
+            <span class="Label">Geometry</span>
+            <select id="compress-geometry" class="Select" aria-label="Geometry compression">
+              <option value="keep">As is</option>
+              <option value="draco">Draco</option>
+              <option value="meshopt">Meshopt</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+          <div class="Row" data-compress="precision">
+            <span class="Label">Precision</span>
+            <select
+              id="compress-precision"
+              class="Select"
+              aria-label="Quantization precision"
+              title="Bits kept per vertex attribute: higher is closer to the original and bigger"
+            >
+              <option value="original">Original</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="custom">Custom</option>
+            </select>
+            <input
+              id="compress-precision-slider"
+              class="compress-slider"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              value="75"
+              aria-label="Precision, as a percentage"
+            />
+            <span id="compress-precision-value" class="compress-value">75%</span>
+          </div>
+          <p id="compress-bits" class="note compress-bits" data-compress="precision"></p>
+          <div class="Row" data-compress="meshopt">
+            <span class="Label">Level</span>
+            <select
+              id="compress-meshopt-level"
+              class="Select"
+              aria-label="Meshopt level"
+              title="High also filters normals and animation, lossily, for a smaller file"
+            >
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <div class="Row" data-compress="meshopt">
+            <span class="Label">Positions</span>
+            <label
+              class="compress-check"
+              title="Smaller, but adds a scale and offset to the nodes that draw meshes"
+            >
+              <input type="checkbox" id="compress-quantize-positions" />
+              Quantize
+            </label>
+          </div>
+          <div class="Row">
+            <span class="Label">Textures</span>
+            <select id="compress-textures" class="Select" aria-label="Texture format">
+              <option value="keep">As is</option>
+              <option value="webp">WebP</option>
+              <option value="jpeg">JPEG</option>
+              <option value="etc1s">KTX2 · ETC1S</option>
+              <option value="uastc">KTX2 · UASTC</option>
+            </select>
+          </div>
+          <div class="Row" data-compress="quality">
+            <span class="Label" id="compress-quality-label">Quality</span>
+            <input
+              id="compress-quality"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              value="80"
+              aria-labelledby="compress-quality-label"
+            />
+            <span id="compress-quality-value" class="compress-value">80</span>
+          </div>
+          <div class="Row" data-compress="uastc">
+            <span class="Label"></span>
+            <label class="compress-check" title="Rate-distortion optimisation: smaller after zstd, slower to encode">
+              <input type="checkbox" id="compress-rdo" />
+              RDO
+            </label>
+          </div>
+          <div class="Row" data-compress="etc1s">
+            <span class="Label"></span>
+            <label class="compress-check" title="ETC1S blocks up normal maps badly; UASTC keeps them clean">
+              <input type="checkbox" id="compress-uastc-normals" />
+              Normal maps as UASTC
+            </label>
+          </div>
+          <div class="Row">
+            <span class="Label">Max size</span>
+            <select
+              id="compress-max-size"
+              class="Select"
+              aria-label="Largest texture size"
+              title="Textures bigger than this are scaled down, keeping their shape"
+            >
+              <option value="0">As is</option>
+              <option value="4096">4096</option>
+              <option value="2048">2048</option>
+              <option value="1024">1024</option>
+              <option value="512">512</option>
+              <option value="256">256</option>
+            </select>
+          </div>
+          <div class="Row">
+            <span class="Label">Unused</span>
+            <label
+              class="compress-check"
+              title="Meshes, materials, textures and skins nothing in the file uses. Nodes always stay."
+            >
+              <input type="checkbox" id="compress-prune" />
+              Drop
+            </label>
+          </div>
+          <div class="Row">
+            <span class="Label"></span>
+            <span class="Buttons">
+              <button id="export-btn" class="Button primary" type="button">Download</button>
+              <button id="compress-cancel-btn" class="Button" type="button" hidden>Cancel</button>
+            </span>
+          </div>
+          <p id="compress-status" class="note" hidden></p>
+          <p id="compress-hint" class="note"></p>
+          <p id="gltf-note" class="note" hidden>
+            External references (<code>.bin</code> / textures) are kept as-is — the exported
+            <code>.gltf</code> drops right back into your project next to your existing files.
           </p>
         </div>
 
@@ -323,7 +638,7 @@
       </div>
     </div>
 
-    <input type="file" id="file-input" accept=".glb,.gltf" hidden />
+    <input type="file" id="file-input" accept=".glb,.gltf" multiple hidden />
     <input type="file" id="folder-input" webkitdirectory multiple hidden />
     <input type="file" id="image-input" accept="image/*,.ktx2" hidden />
     <input type="file" id="resource-input" multiple hidden />

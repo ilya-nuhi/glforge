@@ -9,9 +9,14 @@ export type IconName =
   | 'nodeMesh'
   | 'nodeCamera'
   | 'nodeLight'
+  | 'lightAmbient'
+  | 'lightDirectional'
+  | 'lightHemisphere'
+  | 'lightSpot'
   | 'nodeBone'
   | 'meshData'
   | 'meshDataPlain'
+  | 'morph'
   | 'material'
   | 'scene'
   | 'texture'
@@ -28,18 +33,35 @@ export type IconName =
   | 'locate'
   | 'revert'
   | 'remove'
-  | 'chevron';
+  | 'play'
+  | 'pause'
+  | 'chevron'
+  | 'tune';
 
 const PATHS: Record<IconName, string> = {
-  // An empty/transform-only node: plain axes, as in Blender.
-  nodeEmpty: '<path d="M12 4v16M4 12h16"/>',
+  // An empty/transform-only node: Blender's arrows empty. Not its plain axes —
+  // that '+' sits beside the outliner's opener and reads as a second one.
+  nodeEmpty: '<path d="M12 14V5M12 14l7.8 4.5M12 14l-7.8 4.5"/>',
   // A node that draws something: an isometric cube.
   nodeMesh:
     '<path d="M12 2.6l8.4 4.7v9.4L12 21.4 3.6 16.7V7.3z"/><path d="M12 12l8.4-4.7M12 12l-8.4-4.7M12 12v9.4"/>',
   nodeCamera:
     '<path d="M4 8.5h3l1.5-2h7l1.5 2h3v9.5H4z"/><circle cx="12" cy="13.2" r="2.6"/>',
+  // A bulb: a light that shines out from one point — a file's light, or the
+  // scene's point light.
   nodeLight:
     '<path d="M12 3.2a5.4 5.4 0 0 0-3 9.9V16h6v-2.9a5.4 5.4 0 0 0-3-9.9z"/><path d="M10 18.6h4M10.6 21h2.8"/>',
+  // The scene's other lights, one glyph per kind so the outliner tells them apart.
+  // Ambient: light from everywhere at once, around a core.
+  lightAmbient:
+    '<circle cx="12" cy="12" r="2.6" fill="currentColor"/><circle cx="12" cy="12" r="8" stroke-dasharray="2.4 2.6"/>',
+  // Directional: the sun.
+  lightDirectional:
+    '<circle cx="12" cy="12" r="3.8"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>',
+  // Hemisphere: a sky dome over the ground.
+  lightHemisphere: '<path d="M4 15a8 8 0 0 1 16 0z"/><path d="M4 19h16" stroke-dasharray="2.4 2.2"/>',
+  // Spot: a lamp and the cone it throws.
+  lightSpot: '<path d="M9.4 3.4h5.2v4.2H9.4z"/><path d="M9.4 7.6 4.6 19.6M14.6 7.6l4.8 12M4.6 19.6h14.8"/>',
   nodeBone:
     '<path d="M9.4 14.6l5.2-5.2"/><circle cx="7.2" cy="16.8" r="2.6"/><circle cx="16.8" cy="7.2" r="2.6"/>',
   // Mesh data carrying at least one material: vertices marked.
@@ -47,6 +69,8 @@ const PATHS: Record<IconName, string> = {
     '<path d="M12 4.4L20 18.6H4z"/><circle cx="12" cy="4.4" r="1.5" fill="currentColor"/><circle cx="4" cy="18.6" r="1.5" fill="currentColor"/><circle cx="20" cy="18.6" r="1.5" fill="currentColor"/>',
   // Mesh data with no material assigned at all.
   meshDataPlain: '<path d="M12 4.4L20 18.6H4z" stroke-dasharray="3 2.5"/>',
+  // Morph targets: a shape, and the one it can be blended towards.
+  morph: '<path d="M3.5 10h9v9h-9z"/><circle cx="15.5" cy="8.5" r="5" stroke-dasharray="2.4 2"/>',
   material: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
   scene: '<path d="M3.5 5.5h17v13h-17z"/><path d="M6.5 15l3-3.2 2.6 2.8 2.7-3.6 2.7 4"/>',
   texture:
@@ -73,7 +97,11 @@ const PATHS: Record<IconName, string> = {
   locate: '<circle cx="12" cy="12" r="7.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/>',
   revert: '<path d="M3 8V3M3 8h5"/><path d="M3.5 14a8.5 8.5 0 1 0 2-8.5L3 8"/>',
   remove: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  play: '<path d="M8 5.5v13l10-6.5z" fill="currentColor"/>',
+  pause: '<path d="M7 5.5h3.5v13H7zM13.5 5.5H17v13h-3.5z" fill="currentColor" stroke="none"/>',
   chevron: '<path d="M9.5 6.5l6 5.5-6 5.5"/>',
+  // Two sliders: how a texture is sampled, beside the map it is in.
+  tune: '<path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2"/><circle cx="9" cy="16.5" r="2"/>',
 };
 
 export function iconSvg(name: IconName): string {

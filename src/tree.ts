@@ -174,7 +174,7 @@ export function buildHierarchy(json: GltfJson, sceneIndex: number): TreeItem[] {
   });
 
   if (leftovers.length > 0) {
-    leftovers[0].groupNote = 'Not used in this scene';
+    leftovers[0].groupNote = 'Not in the file’s scene';
     items.push(...leftovers);
   }
 

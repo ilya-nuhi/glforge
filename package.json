@@ -14,6 +14,13 @@
     "vite": "^7.1.0"
   },
   "dependencies": {
+    "@gltf-transform/core": "^4.5.1",
+    "@gltf-transform/extensions": "^4.5.1",
+    "@gltf-transform/functions": "^4.5.1",
+    "draco3dgltf": "^1.5.7",
+    "fflate": "^0.8.3",
+    "ktx2-encoder": "^0.6.0",
+    "meshoptimizer": "^1.3.0",
     "three": "^0.185.1"
   }
 }
