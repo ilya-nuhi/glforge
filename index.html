@@ -26,6 +26,7 @@
           <div class="option" data-action="open">Open file…</div>
           <div class="option" data-action="open-folder">Open folder…</div>
           <div class="option" data-action="import-scene">Import studio scene…</div>
+          <div class="option" data-action="export-scene">Export studio scene</div>
           <hr />
           <div class="option" data-action="new-scene">New scene</div>
           <div class="option" data-action="rename-scene">Rename scene…</div>
@@ -45,6 +46,8 @@
         <div class="options">
           <div class="option" data-action="undo">Undo<span class="key">Ctrl+Z</span></div>
           <div class="option" data-action="redo">Redo<span class="key">Ctrl+Y</span></div>
+          <div class="option" data-action="copy">Copy<span class="key">Ctrl+C</span></div>
+          <div class="option" data-action="paste">Paste<span class="key">Ctrl+V</span></div>
           <div class="option" data-action="delete">Delete<span class="key">Del</span></div>
           <hr />
           <div class="option" data-action="find">Find &amp; replace…</div>
@@ -58,6 +61,10 @@
           <div class="option toggle toggle-on" data-action="grid">Grid</div>
           <div class="option toggle toggle-on" data-action="gizmo">Transform gizmo</div>
           <hr />
+          <div class="option toggle toggle-on" data-action="shading-solid">Solid</div>
+          <div class="option toggle" data-action="shading-normals">Normals</div>
+          <div class="option toggle" data-action="shading-wireframe">Wireframe</div>
+          <hr />
           <div class="option toggle toggle-on" data-action="mode-translate">
             Move<span class="key">W</span>
           </div>
@@ -65,7 +72,6 @@
           <div class="option toggle" data-action="mode-scale">Scale<span class="key">R</span></div>
           <div class="option toggle" data-action="space">Local axes</div>
           <hr />
-          <div class="option" data-action="frame">Frame all<span class="key">F</span></div>
           <div class="option" data-action="isolate">Isolate selection</div>
           <div class="option" data-action="show-all">Show all</div>
           <hr />
@@ -156,7 +162,6 @@
           World
         </button>
         <span class="toolbar-sep" aria-hidden="true"></span>
-        <button id="frame-btn" class="Button" type="button" title="Frame everything (F)">Frame</button>
         <button id="isolate-btn" class="Button" type="button" title="Show only the selection" hidden>
           Isolate
         </button>
@@ -170,6 +175,12 @@
         >
           Grid
         </button>
+        <span class="toolbar-sep" aria-hidden="true"></span>
+        <select id="shading-select" class="Select" title="How the viewport draws meshes" aria-label="Shading">
+          <option value="solid">Solid</option>
+          <option value="normals">Normals</option>
+          <option value="wireframe">Wireframe</option>
+        </select>
       </div>
     </div>
 

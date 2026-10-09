@@ -520,6 +520,11 @@ body.dragover #dropzone .dropzone-title {
   align-items: center;
 }
 
+/* The shading dropdown stands as tall as the buttons beside it. */
+#toolbar .Select {
+  height: 32px;
+}
+
 /* Resizer ---------------------------------------------------------------- */
 
 #resizer {

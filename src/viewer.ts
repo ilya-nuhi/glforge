@@ -84,7 +84,6 @@ import {
   VSMShadowMap,
   WebGLRenderer,
   type BufferGeometry,
-  type InstancedMesh,
   type Light,
   type LightShadow,
   type MagnificationTextureFilter,
@@ -202,12 +201,27 @@ export interface SceneStats {
   objects: number;
   vertices: number;
   triangles: number;
+  /**
+   * Draw calls the last frame made, shadow passes included. The editor's own
+   * grid, boxes, gizmo and light helpers are left out.
+   */
+  drawCalls: number;
   /** Milliseconds the last frame spent inside `renderer.render`. */
   renderTime: number;
 }
 
 /** What the gizmo is doing to whatever it is attached to. */
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
+
+/**
+ * How the viewport draws meshes — the three.js editor's viewport shading.
+ * Solid draws their own materials; Normals and Wireframe draw every one of
+ * them with a single look, for seeing their shape. None of it is in a file.
+ */
+export type Shading = 'solid' | 'normals' | 'wireframe';
+
+/** Light lines, since the viewport behind them is dark. */
+const WIREFRAME_COLOR = 0xbbbbbb;
 
 /** A node's local transform, in the shape glTF stores it. */
 export interface NodeTrs {
@@ -363,6 +377,9 @@ export class Viewer {
   private gizmoObject: number | null = null;
   private grid: GridHelper | null = null;
   private gridVisible = true;
+  private shading: Shading = 'solid';
+  /** What Normals and Wireframe draw with, made the first time each is wanted. */
+  private readonly shadingMaterials = new Map<string, Material>();
   private envTexture: Texture | null = null;
 
   private readonly models = new Map<number, LoadedModel>();
@@ -398,6 +415,12 @@ export class Viewer {
   private readonly idByObject = new Map<Object3D, number>();
   /** Scene objects hidden in the preview, kept by id like a model's hidden sets. */
   private readonly hiddenObjects = new Set<number>();
+  /**
+   * What Isolate last left on its own, and what was hidden right after, so
+   * `isIsolated` can tell whether that still stands without every change to
+   * the hidden sets having to remember to call it off.
+   */
+  private isolation: { ref: SelectionRef; hidden: string } | null = null;
   private readonly pickerMaterial = new MeshBasicMaterial({ visible: false });
   /** How big light helpers are drawn, following the floor. */
   private helperSize = 10 * HELPER_SCALE;
@@ -424,6 +447,8 @@ export class Viewer {
   private sceneBox = new Box3();
   /** The scene's own shapes alone, as the floor was last fitted to them. */
   private objectsBox = new Box3();
+  /** A sphere holding the scene and its floor: what the depth range has to reach. */
+  private reach = { center: new Vector3(), radius: 1 };
   private selection: SelectionRef | null = null;
   /** The scene object picked, when the selection is one of those rather than a model's. */
   private selectedObject: number | null = null;
@@ -437,8 +462,15 @@ export class Viewer {
   private readonly extraBoxes: Box3Helper[] = [];
   private pointerDownAt: Vector2 | null = null;
   /** Counting geometry walks the scene, so it is cached until the scene moves. */
-  private counts: Omit<SceneStats, 'renderTime'> | null = null;
+  private counts: Omit<SceneStats, 'drawCalls' | 'renderTime'> | null = null;
   private renderTime = 0;
+  private drawCalls = 0;
+  /** Draws of the editor's own overlays in the frame being rendered. */
+  private overlayDraws = 0;
+  /** Every overlay object's onBeforeRender, which fires once per draw of it. */
+  private readonly countOverlayDraw = (): void => {
+    this.overlayDraws++;
+  };
   private frameRequested = false;
   private disposed = false;
   /** Whether a clip that reaches its end starts over — the same for every model. */
@@ -486,6 +518,7 @@ export class Viewer {
       helper.visible = false;
       // Helpers must never intercept clicks or inflate a bounding box.
       helper.raycast = () => {};
+      this.markOverlay(helper);
       this.scene.add(helper);
     }
 
@@ -505,6 +538,7 @@ export class Viewer {
     });
     this.gizmo.addEventListener('objectChange', () => this.reportTransform());
     this.gizmo.addEventListener('change', () => this.invalidate());
+    this.markOverlay(this.gizmo.getHelper());
     this.scene.add(this.gizmo.getHelper());
     // A floor from the start, for a scene that has nothing with a size in it yet.
     this.updateGrid();
@@ -1273,6 +1307,7 @@ export class Viewer {
     helper.traverse((part) => {
       part.raycast = () => {};
     });
+    this.markOverlay(helper);
     // The picker follows the light by sharing its world matrix, the way the
     // helpers themselves do.
     const picker = new Mesh(new SphereGeometry(size * 1.2, 8, 4), this.pickerMaterial);
@@ -1600,14 +1635,39 @@ export class Viewer {
    * same hidden sets, so "Show all" undoes it.
    */
   isolate(ref: SelectionRef): void {
-    this.isolateMany([ref], []);
+    if (this.isolateMany([ref], [])) this.isolation = { ref: { ...ref }, hidden: this.hiddenKey() };
+  }
+
+  /**
+   * Whether `ref` is what Isolate left on its own, with nothing shown or hidden
+   * since — which is when its Isolate button is a Show all instead.
+   */
+  isIsolated(ref: SelectionRef): boolean {
+    const at = this.isolation?.ref;
+    if (!at || at.model !== ref.model || at.node !== ref.node || at.mesh !== ref.mesh) return false;
+    if (at.material !== ref.material) return false;
+    return this.isolation?.hidden === this.hiddenKey();
+  }
+
+  /** Everything hidden, written out the same way whatever order it was hidden in. */
+  private hiddenKey(): string {
+    const sorted = (set: Set<number>): string => [...set].sort((a, b) => a - b).join(',');
+    const parts = [sorted(this.hiddenModels), sorted(this.hiddenObjects)];
+    for (const id of [...this.hidden.keys()].sort((a, b) => a - b)) {
+      const sets = this.hidden.get(id)!;
+      // A set emptied again hides nothing, so it reads the same as none at all.
+      if (HIDE_KINDS.every((kind) => sets[kind].size === 0)) continue;
+      parts.push(`${id}:` + HIDE_KINDS.map((kind) => sorted(sets[kind])).join('/'));
+    }
+    return parts.join('|');
   }
 
   /**
    * Isolate for several things at once — parts of models and scene objects
-   * alike: what is kept is everything any of them needs to be seen.
+   * alike: what is kept is everything any of them needs to be seen. Returns
+   * whether there was anything to keep, and so whether anything changed.
    */
-  isolateMany(refs: readonly SelectionRef[], objects: readonly number[]): void {
+  isolateMany(refs: readonly SelectionRef[], objects: readonly number[]): boolean {
     const keep = new Set<Object3D>();
     const keepWith = (target: Object3D): void => {
       target.traverse((object) => keep.add(object));
@@ -1618,8 +1678,10 @@ export class Viewer {
       const entry = this.sceneObjects.get(id);
       if (entry) keepWith(entry.object);
     }
-    if (keep.size === 0) return;
+    if (keep.size === 0) return false;
 
+    // `isolate` puts it back when it is one thing on its own.
+    this.isolation = null;
     const shown = new Set(refs.map((ref) => ref.model));
     this.hiddenModels.clear();
     this.hidden.clear();
@@ -1636,6 +1698,7 @@ export class Viewer {
     }
     this.hideShapesExcept(keep);
     this.applyVisibility();
+    return true;
   }
 
   private applyVisibility(): void {
@@ -1938,6 +2001,7 @@ export class Viewer {
       const helper = new Box3Helper(new Box3(), new Color(SELECT_COLOR));
       helper.visible = false;
       helper.raycast = () => {};
+      this.markOverlay(helper);
       this.scene.add(helper);
       this.extraBoxes.push(helper);
     }
@@ -2188,23 +2252,13 @@ export class Viewer {
   }
 
   /**
-   * Puts the camera back where a stored view had it. The depth range is derived
-   * the way `fit` does rather than stored, since it belongs to the scene's scale
-   * and not to the view.
+   * Puts the camera back where a stored view had it. The depth range is not
+   * stored: every frame fits it to where the camera is (see `fitDepth`).
    */
   setView(view: CameraView): void {
     if (![...view.position, ...view.target].every(Number.isFinite)) return;
     this.camera.position.fromArray(view.position);
     this.controls.target.fromArray(view.target);
-
-    const size = this.sceneBox.isEmpty()
-      ? new Vector3(1, 1, 1)
-      : this.sceneBox.getSize(new Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const distance = this.camera.position.distanceTo(this.controls.target) || maxDim;
-    this.camera.near = Math.max(maxDim / 1000, 1e-5);
-    this.camera.far = Math.max(distance * 20, maxDim * 100);
-    this.camera.updateProjectionMatrix();
     this.controls.update();
     this.invalidate();
   }
@@ -2256,10 +2310,6 @@ export class Viewer {
     const fov = (this.camera.fov * Math.PI) / 180;
     const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.6;
     this.camera.position.copy(center).addScaledVector(direction, distance);
-    // Depth range has to track model scale, which ranges from millimetres to kilometres.
-    this.camera.near = Math.max(maxDim / 1000, 1e-5);
-    this.camera.far = Math.max(distance * 20, maxDim * 100);
-    this.camera.updateProjectionMatrix();
     this.controls.target.copy(center);
     this.controls.update();
     this.invalidate();
@@ -2287,7 +2337,10 @@ export class Viewer {
     const grid = new GridHelper(extent, 20, 0x4a4a4a, 0x2c2c2c);
     const center = fitted.getCenter(new Vector3());
     grid.position.set(center.x, fitted.min.y, center.z);
+    // The floor's far corners are within one side of the centre, and so is all the scene.
+    this.reach = { center, radius: extent };
     grid.raycast = () => {};
+    this.markOverlay(grid);
     // A reload rebuilds the helper; keep whatever the toolbar last asked for.
     grid.visible = this.gridVisible;
     this.grid = grid;
@@ -2300,6 +2353,59 @@ export class Viewer {
     this.gridVisible = visible;
     if (this.grid) this.grid.visible = visible;
     this.invalidate();
+  }
+
+  setShading(shading: Shading): void {
+    this.shading = shading;
+    this.invalidate();
+  }
+
+  /**
+   * Normals and Wireframe put their look on every mesh of the models and on the
+   * scene's own shapes, for this draw alone — so material edits, previews and
+   * reloads never see it. The editor sets `scene.overrideMaterial` instead, but
+   * here that would take the grid, the gizmo and the light helpers with it,
+   * since they are in the same scene. Points and lines are drawn as they are.
+   */
+  private swapInShading(): () => void {
+    if (this.shading === 'solid') return NOTHING_SWAPPED;
+    const swapped: [Mesh, Material | Material[]][] = [];
+    const swap = (object: Object3D): void => {
+      if (!isTriangleMesh(object)) return;
+      const mesh = object as Mesh;
+      const original = mesh.material;
+      swapped.push([mesh, original]);
+      // A mesh with several materials keeps one draw per part, as the editor's does.
+      mesh.material = Array.isArray(original)
+        ? original.map((material) => this.shadingMaterial(material))
+        : this.shadingMaterial(original);
+    };
+    for (const model of this.models.values()) model.group.traverse(swap);
+    this.objectsRoot.traverse(swap);
+    return () => {
+      for (const [mesh, material] of swapped) mesh.material = material;
+    };
+  }
+
+  /**
+   * The look a mesh is drawn with under Normals or Wireframe. Normals faces the
+   * way the mesh's own material does, so a one-sided plane seen from behind is
+   * still not there; a material that is not drawn at all stays that way.
+   */
+  private shadingMaterial(original: Material): Material {
+    if (!original.visible) return original;
+    const key = this.shading === 'normals' ? `normals:${original.side}` : this.shading;
+    let material = this.shadingMaterials.get(key);
+    if (!material) {
+      material =
+        this.shading === 'normals'
+          ? new MeshNormalMaterial({ side: original.side })
+          : new MeshBasicMaterial({ color: WIREFRAME_COLOR, wireframe: true });
+      // The colours are the point of both, so they are drawn as they are.
+      material.toneMapped = false;
+      this.shadingMaterials.set(key, material);
+    }
+    return material;
   }
 
   // -------------------------------------------------------------------------
@@ -2316,13 +2422,12 @@ export class Viewer {
         if (!isDrawable(object)) return;
         const position = object.geometry.attributes.position;
         if (!position) return;
-        // EXT_mesh_gpu_instancing draws one geometry once per instance.
-        const instanced = object as InstancedMesh;
-        const copies = instanced.isInstancedMesh ? instanced.count : 1;
-        vertices += position.count * copies;
+        // An EXT_mesh_gpu_instancing mesh counts its geometry once, not once per
+        // instance, so the numbers match the three.js editor's.
+        vertices += position.count;
         if (!isTriangleMesh(object)) return;
         const indices = object.geometry.index?.count ?? position.count;
-        triangles += (indices / 3) * copies;
+        triangles += indices / 3;
       };
       for (const model of this.models.values()) {
         // traverseVisible only reads each object's own flag, so a hidden
@@ -2335,7 +2440,18 @@ export class Viewer {
       for (const child of this.objectsRoot.children) child.traverseVisible(count);
       this.counts = { objects, vertices, triangles };
     }
-    return { ...this.counts, renderTime: this.renderTime };
+    return { ...this.counts, drawCalls: this.drawCalls, renderTime: this.renderTime };
+  }
+
+  /**
+   * Leaves an overlay of the editor's own out of the draw call count. The
+   * renderer counts every draw it makes, so each of the overlay's is counted
+   * here as well and taken off again.
+   */
+  private markOverlay(object: Object3D): void {
+    object.traverse((part) => {
+      part.onBeforeRender = this.countOverlayDraw;
+    });
   }
 
   private resize(): void {
@@ -2370,23 +2486,50 @@ export class Viewer {
     if (playing) this.invalidate();
   }
 
+  /**
+   * Fits the camera's depth range to where it is now, every frame, since model
+   * scale ranges from millimetres to kilometres. Fitted once to whatever was
+   * framed, zooming back out from a small thing cut the rest of the scene off at
+   * the far plane. Far reaches past the floor's far edge from wherever orbiting
+   * and zooming have taken the camera; near follows how close it is to what it
+   * orbits, so a small thing close up is not cut into either — but stays within
+   * 1e5 of far, the most a depth buffer resolves before distant surfaces fight.
+   */
+  private fitDepth(): void {
+    const position = this.camera.position;
+    const distance = position.distanceTo(this.controls.target) || 1;
+    const far = Math.max(distance * 20, (position.distanceTo(this.reach.center) + this.reach.radius) * 1.05);
+    const near = Math.max(distance / 1000, far / 1e5, 1e-5);
+    if (this.camera.near === near && this.camera.far === far) return;
+    this.camera.near = near;
+    this.camera.far = far;
+    this.camera.updateProjectionMatrix();
+  }
+
   /** The draw itself, callable outside an animation frame (see `resize`). */
   private render(): void {
     if (this.disposed) return;
     // The pane can be collapsed; a later resize will invalidate again.
     if (this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
     const moving = this.controls.update();
+    this.fitDepth();
     this.updateHelpers();
     this.fitShadowCameras();
     const start = performance.now();
     // Previewed images stand in for the file's own for this draw alone.
     const restore = this.swapInPreviews();
+    // Normals and Wireframe likewise stand in for every mesh's material.
+    const unshade = this.swapInShading();
+    this.overlayDraws = 0;
     try {
       this.renderer.render(this.scene, this.camera);
     } finally {
+      unshade();
       restore();
     }
     this.renderTime = performance.now() - start;
+    // The renderer's count starts over with each render, shadow passes included.
+    this.drawCalls = Math.max(0, this.renderer.info.render.calls - this.overlayDraws);
     this.callbacks.onRender();
     // Damping keeps moving the camera for a few frames after input stops.
     if (moving) this.invalidate();
@@ -2411,6 +2554,7 @@ export class Viewer {
     for (const id of [...this.models.keys()]) this.dropModel(id);
     for (const id of [...this.sceneObjects.keys()]) this.dropObject(id);
     this.pickerMaterial.dispose();
+    for (const material of this.shadingMaterials.values()) material.dispose();
     if (this.grid) {
       this.grid.geometry.dispose();
       disposeMaterialOf(this.grid.material);

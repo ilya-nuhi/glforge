@@ -627,6 +627,14 @@ function previewKey(sources: PreviewSource[], settings: CompressSettings): strin
   ]);
 }
 
+/** A model's file ready for the worker, and how big it was. */
+export interface PreparedSource {
+  source: CompressSource;
+  before: number;
+  /** The buffers the worker can be handed outright. */
+  transfer: ArrayBuffer[];
+}
+
 /**
  * The file as the plain Download would write it — `file`, with its trims
  * already keyframes — split into its JSON and the bytes it refers to. A .glb's
@@ -634,11 +642,11 @@ function previewKey(sources: PreviewSource[], settings: CompressSettings): strin
  * a .gltf's become data URIs, and anything still external is read from the
  * files supplied with the model.
  */
-async function prepareSource(
+export async function prepareSource(
   model: CompressModel,
   file: { json: GltfJson; chunks: GlbChunk[] },
   added: Map<number, ImageBytes>,
-): Promise<{ source: CompressSource; before: number; transfer: ArrayBuffer[] }> {
+): Promise<PreparedSource> {
   let json: GltfJson;
   let bin: Uint8Array<ArrayBuffer> | null = null;
   let before: number;
@@ -677,6 +685,95 @@ async function prepareSource(
   // worker; the binary chunk is shared with the preview and is copied.
   const transfer = Object.values(resources).map((bytes) => bytes.buffer);
   return { source: { json, bin, resources }, before, transfer };
+}
+
+/**
+ * A digest of everything a file is written from. Two models with the same one
+ * write the same files — instances of one file, opened from a studio scene —
+ * so an export can carry those files once.
+ */
+export async function sourceDigest(source: CompressSource): Promise<string> {
+  const encoder = new TextEncoder();
+  const parts: Uint8Array<ArrayBuffer>[] = [
+    encoder.encode(JSON.stringify(source.json)),
+    source.bin ?? new Uint8Array(),
+  ];
+  for (const uri of Object.keys(source.resources).sort()) {
+    parts.push(encoder.encode(uri), source.resources[uri]);
+  }
+  // Each part on its own, then their digests in a row: no two lists of parts
+  // run together into the same bytes.
+  const digests = await Promise.all(parts.map((part) => crypto.subtle.digest('SHA-256', part)));
+  const joined = new Uint8Array(digests.length * 32);
+  digests.forEach((digest, index) => joined.set(new Uint8Array(digest), index * 32));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', joined));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** Writes prepared models as a .gltf with its files, one after another. */
+export interface GltfWriter {
+  /**
+   * The model as `${basename}.gltf`, its `.bin` and its textures — the file as
+   * edited, nothing re-encoded — keyed by the path the .gltf spells each with.
+   */
+  write: (prepared: PreparedSource, basename: string) => Promise<Map<string, Uint8Array>>;
+  /** Lets the worker go. */
+  close: () => void;
+}
+
+/**
+ * A writer for exports that carry models as files of their own, such as a
+ * studio scene. It is the Download panel's worker with every choice at As is,
+ * kept for as many models as it is handed: one at a time, never two at once.
+ */
+export function createGltfWriter(): GltfWriter {
+  let worker: Worker | null = null;
+  return {
+    write(prepared, basename) {
+      const current = (worker ??= new Worker(new URL('./compress.worker.ts', import.meta.url), {
+        type: 'module',
+      }));
+      return new Promise((resolve, reject) => {
+        const stop = () => {
+          current.removeEventListener('message', onMessage);
+          current.removeEventListener('error', onError);
+        };
+        const onMessage = (event: MessageEvent<CompressReply>) => {
+          const reply = event.data;
+          if (reply.type === 'progress') return;
+          stop();
+          if (reply.type === 'error') {
+            reject(new Error(reply.message));
+            return;
+          }
+          import('fflate').then(
+            ({ unzipSync }) => resolve(new Map(Object.entries(unzipSync(reply.bytes)))),
+            reject,
+          );
+        };
+        const onError = (event: ErrorEvent) => {
+          stop();
+          // A worker that failed to load is no use to the next model either.
+          current.terminate();
+          if (worker === current) worker = null;
+          reject(new Error(event.message || 'the writer failed to load'));
+        };
+        current.addEventListener('message', onMessage);
+        current.addEventListener('error', onError);
+        const request: CompressRequest = {
+          source: prepared.source,
+          settings: { ...DEFAULTS },
+          output: 'gltf-zip',
+          basename,
+        };
+        current.postMessage(request, prepared.transfer);
+      });
+    },
+    close() {
+      worker?.terminate();
+      worker = null;
+    },
+  };
 }
 
 function summarize(report: CompressReport, before: number, after: number): string[] {

@@ -11,11 +11,14 @@
  * - colour space belongs to the slot as well, but glTF fixes it: colour maps
  *   are sRGB and data maps linear
  *
- * The editor's texture has two things glTF has no form for. Anisotropy is kept
+ * The editor's texture has three things glTF has no form for. Anisotropy is kept
  * in the sampler's extras, the way material.ts keeps Phong's shininess; GLTFLoader
  * does not read it, so the preview puts it on itself. A rotation centre is folded
- * into the offset — which is what makes every viewer turn the texture about it —
- * and remembered in the transform's extras so the dialog can show it again.
+ * into the offset — which is what makes every viewer turn the texture about it.
+ * And flipY, which GLTFLoader always sets false (glTF's V runs down the image)
+ * and three.js ignores for image bitmaps and KTX2 anyway, is folded into the
+ * transform as V turned over. Both are remembered in the transform's extras so
+ * the dialog can show them again.
  *
  * Nothing here touches three.js: `textureLook` says what the loader would set
  * on a slot's texture, and the viewer applies that.
@@ -216,6 +219,8 @@ export interface UvTransform {
   rotation: number;
   /** What the texture turns and scales about, in UV units. */
   center: [number, number];
+  /** The image upside down: V read from the other edge, after the transform. */
+  flipY: boolean;
 }
 
 function transformOf(info: TextureInfo | undefined): Record<string, unknown> | undefined {
@@ -252,7 +257,10 @@ function pivotShift(center: [number, number], repeat: [number, number], rotation
   ];
 }
 
-/** A slot's UV set and transform, in the editor's terms: the offset as typed, before the centre's part. */
+/**
+ * A slot's UV set and transform, in the editor's terms: the offset as typed,
+ * before the centre's part, and the repeat before the flip's.
+ */
 export function readUvTransform(material: GltfMaterial, slot: MapSlot): UvTransform {
   const info = getMaterialTexture(material, slot);
   const transform = transformOf(info);
@@ -261,6 +269,11 @@ export function readUvTransform(material: GltfMaterial, slot: MapSlot): UvTransf
   const rotation = number(transform?.rotation, 0);
   const extras = transform?.extras as Record<string, unknown> | undefined;
   const center = pair(extras?.center, [0, 0]);
+  const flipY = extras?.flipY === true;
+  if (flipY) {
+    stored[1] = 1 - stored[1];
+    repeat[1] = -repeat[1];
+  }
   const shift = pivotShift(center, repeat, rotation);
   return {
     texCoord: texCoordOf(info),
@@ -268,13 +281,15 @@ export function readUvTransform(material: GltfMaterial, slot: MapSlot): UvTransf
     repeat,
     rotation,
     center,
+    flipY,
   };
 }
 
 /**
  * Writes a slot's UV set and transform. The offset stored is the one that turns
- * the texture about the centre, so every viewer shows what the dialog did; with
- * nothing left to transform, the extension goes altogether.
+ * the texture about the centre, and a flip is stored as the transform doing it,
+ * so every viewer shows what the dialog did; with nothing left to transform,
+ * the extension goes altogether.
  */
 export function setUvTransform(json: GltfJson, material: GltfMaterial, slot: MapSlot, uv: UvTransform): void {
   const info = getMaterialTexture(material, slot);
@@ -287,16 +302,25 @@ export function setUvTransform(json: GltfJson, material: GltfMaterial, slot: Map
   // The slot's own texCoord says it now, for viewers without the extension too.
   delete transform.texCoord;
   const shift = pivotShift(uv.center, uv.repeat, uv.rotation);
-  const offset: [number, number] = [tidy(uv.offset[0] + shift[0]), tidy(uv.offset[1] + shift[1])];
-  putTransformValue(transform, 'offset', offset, [0, 0]);
-  putTransformValue(transform, 'scale', uv.repeat.map(tidy), [1, 1]);
+  const offset: [number, number] = [uv.offset[0] + shift[0], uv.offset[1] + shift[1]];
+  const repeat: [number, number] = [uv.repeat[0], uv.repeat[1]];
+  // three.js reads the transformed V as is (Matrix3.setUvTransform), so V
+  // turned over last — 1 - v — is offset.y to 1 - y and scale.y negated.
+  if (uv.flipY) {
+    offset[1] = 1 - offset[1];
+    repeat[1] = -repeat[1];
+  }
+  putTransformValue(transform, 'offset', offset.map(tidy), [0, 0]);
+  putTransformValue(transform, 'scale', repeat.map(tidy), [1, 1]);
   putTransformValue(transform, 'rotation', tidy(uv.rotation), 0);
 
   const extras: Record<string, unknown> = { ...(transform.extras as Record<string, unknown> | undefined) };
-  // A centre only means something to a rotation or a repeat.
-  const moves = 'scale' in transform || 'rotation' in transform;
+  // A centre only means something to a rotation or a repeat — the flip's own scale aside.
+  const moves = uv.repeat.some((value) => tidy(value) !== 1) || tidy(uv.rotation) !== 0;
   if (moves && (uv.center[0] !== 0 || uv.center[1] !== 0)) extras.center = uv.center.map(tidy);
   else delete extras.center;
+  if (uv.flipY) extras.flipY = true;
+  else delete extras.flipY;
   if (Object.keys(extras).length > 0) transform.extras = extras;
   else delete transform.extras;
 

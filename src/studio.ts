@@ -1,12 +1,16 @@
 /**
- * Reading a scene exported from the studio: a folder (or the unzipped export)
+ * The studio's scene export, both ways: a folder (or the unzipped export)
  * holding `___main.json` — the scene tree — and `___meta.json`, which lists the
  * assets the tree refers to, each in a folder named after its UUID.
  *
- * The tree is turned into what this app has: lights, shapes and empty nodes
- * become the scene's own objects, each model node becomes a model opened at the
- * place the studio had it, and the studio's camera becomes the view. Scripts,
- * fog and the background have no counterpart here and are left behind.
+ * Read, the tree is turned into what this app has: lights, shapes and empty
+ * nodes become the scene's own objects, each model node becomes a model opened
+ * at the place the studio had it, and the studio's camera becomes the view.
+ * Scripts, fog and the background have no counterpart here and are left behind.
+ *
+ * Written, the same goes the other way, as a zip the studio's scene import
+ * takes: every model goes as an asset of its own, a .gltf with its .bin and
+ * textures, and the view goes as the scene's camera.
  *
  * Free of three.js, like scene.ts and transform.ts: this runs before the
  * preview has loaded.
@@ -21,7 +25,17 @@ import {
   type SceneObjectKind,
 } from './scene';
 import { SHADOW_MAP_SIZES } from './shadow';
-import { eulerToQuaternion, toRadians, type Quat, type Trs, type Vec3 } from './transform';
+import {
+  DEFAULT_TRS,
+  decomposeMatrix,
+  eulerToQuaternion,
+  quaternionToEuler,
+  toDegrees,
+  toRadians,
+  type Quat,
+  type Trs,
+  type Vec3,
+} from './transform';
 import type { CameraView } from './viewer';
 
 const MAIN_FILE = '___main.json';
@@ -34,6 +48,8 @@ export interface StudioModel {
   file: PickedFile;
   /** The rest of the model's asset folder: its buffers and textures. */
   sidecars: PickedFile[];
+  /** Where the studio project keeps the file, when the export says. */
+  projectPath: string | null;
   /** Where the studio has it, in world space: models here are not parented. */
   placement: Trs;
   hidden: boolean;
@@ -85,15 +101,16 @@ export async function readStudioScene(picked: readonly PickedFile[]): Promise<St
 
   const meta = picked.find((item) => item.path === root + META_FILE);
   const zipPaths = new Map<string, string[]>();
+  const projectPaths = new Map<string, string[]>();
   if (meta) {
     try {
       const parsed = JSON.parse(await meta.file.text()) as {
-        assets?: { uuid?: string; assetsZipPaths?: string[] }[];
+        assets?: { uuid?: string; assets?: string[]; assetsZipPaths?: string[] }[];
       };
       for (const asset of parsed.assets ?? []) {
-        if (typeof asset.uuid === 'string' && Array.isArray(asset.assetsZipPaths)) {
-          zipPaths.set(asset.uuid, asset.assetsZipPaths);
-        }
+        if (typeof asset.uuid !== 'string') continue;
+        if (Array.isArray(asset.assetsZipPaths)) zipPaths.set(asset.uuid, asset.assetsZipPaths);
+        if (Array.isArray(asset.assets)) projectPaths.set(asset.uuid, asset.assets);
       }
     } catch {
       // The asset folders are named after their UUIDs anyway; the tree is enough.
@@ -144,10 +161,17 @@ export async function readStudioScene(picked: readonly PickedFile[]): Promise<St
       const modelFiles = files.filter((item) => /\.(glb|gltf)$/i.test(item.path));
       const file = modelFiles.find((item) => baseName(item.path) === wanted) ?? modelFiles[0];
       if (file) {
+        // The meta has where the file is now; the node, where it was when placed.
+        const projectPath =
+          projectPaths.get(uuid)?.find((path) => baseName(path) === baseName(file.path)) ??
+          (typeof model.modelPath === 'string' && baseName(model.modelPath) === baseName(file.path)
+            ? model.modelPath
+            : null);
         scene.models.push({
           name: uniqueName(name || baseName(file.path), takenModelNames),
           file,
           sidecars: files.filter((item) => item !== file),
+          projectPath,
           placement: world,
           hidden,
         });
@@ -169,18 +193,19 @@ export async function readStudioScene(picked: readonly PickedFile[]): Promise<St
 
     const kind = KIND_OF_TYPE[type] ?? 'group';
     const label = name || SCENE_OBJECT_KINDS[kind].name;
-    // The children of a plane were placed in the studio plane's own frame, which
-    // flattening it would turn: such a plane goes inside a group that keeps it.
-    const holder =
-      kind === 'plane' && children.length > 0 ? createSceneObject('group', nextId++, label, parent) : null;
+    const fit = SHAPE_FIT[kind];
+    // The children of a shape drawn differently here were placed in the studio
+    // shape's own frame, which fitting it would change: such a shape goes
+    // inside a group that keeps that frame.
+    const holder = fit && children.length > 0 ? createSceneObject('group', nextId++, label, parent) : null;
     const object = createSceneObject(kind, nextId++, label, holder?.id ?? parent);
     applyProps(object, components, type);
     if (holder) {
       holder.trs = local;
-      object.trs = standPlane();
+      object.trs = fitFromStudio(DEFAULT_TRS, fit!);
       scene.objects.push(holder);
     } else {
-      object.trs = kind === 'plane' ? flattenPlane(local) : local;
+      object.trs = fit ? fitFromStudio(local, fit) : local;
     }
     scene.objects.push(object);
     if (hidden) scene.hiddenObjects.push((holder ?? object).id);
@@ -216,6 +241,21 @@ const KIND_OF_TYPE: Record<string, SceneObjectKind> = {
   sphere: 'sphere',
   cylinder: 'cylinder',
   cone: 'cone',
+};
+
+/** The studio node type each scene object goes out as. */
+const TYPE_OF_KIND: Record<SceneObjectKind, string> = {
+  group: 'node3D',
+  box: 'box',
+  sphere: 'sphere',
+  cylinder: 'cylinder',
+  cone: 'cone',
+  plane: 'plane',
+  ambient: 'ambientLight',
+  directional: 'directionalLight',
+  hemisphere: 'hemisphereLight',
+  point: 'pointLight',
+  spot: 'spotLight',
 };
 
 /** Whatever the studio's components say about the object that this app's kind of it has. */
@@ -281,26 +321,50 @@ function readTrs(transform: Record<string, unknown>): Trs {
 }
 
 /**
- * The studio's plane is three.js's, standing in XY; this app's lies flat in XZ
- * (it is three.js's turned -90° about X). The same surface lands in the same
- * place when the turn is undone in the rotation and Y and Z swap in the scale.
+ * How one of the studio's shapes is made into this app's: the studio draws
+ * three.js's own at size 1, so its sphere, cylinder and cone are twice as wide
+ * as these, which have a radius of 0.5; and its plane stands in XY, where this
+ * app's lies flat in XZ. A box is the same in both.
+ *
+ * A turn is always a quarter turn about X, which swaps Y and Z in any scale it
+ * is moved past.
  */
-function flattenPlane(trs: Trs): Trs {
-  const [x, y, z] = trs.scale;
+type ShapeFit = { turn: Quat } | { scale: Vec3 };
+
+const SHAPE_FIT: Partial<Record<SceneObjectKind, ShapeFit>> = {
+  sphere: { scale: [0.5, 0.5, 0.5] },
+  cylinder: { scale: [0.5, 1, 0.5] },
+  cone: { scale: [0.5, 1, 0.5] },
+  // -90° about X.
+  plane: { turn: [-Math.SQRT1_2, 0, 0, Math.SQRT1_2] },
+};
+
+/** The studio's transform for a shape this app draws at `trs`: the same surface, in the same place. */
+function fitToStudio(trs: Trs, fit: ShapeFit): Trs {
+  return applyFit(trs, fit, false);
+}
+
+/** This app's transform for a shape the studio draws at `trs`: the same surface, in the same place. */
+function fitFromStudio(trs: Trs, fit: ShapeFit): Trs {
+  return applyFit(trs, fit, true);
+}
+
+function applyFit(trs: Trs, fit: ShapeFit, undo: boolean): Trs {
+  if ('turn' in fit) {
+    const [x, y, z] = trs.scale;
+    const [tx, ty, tz, tw] = fit.turn;
+    return {
+      translation: [...trs.translation],
+      rotation: multiply(trs.rotation, undo ? [-tx, -ty, -tz, tw] : fit.turn),
+      scale: [x, z, y],
+    };
+  }
   return {
     translation: [...trs.translation],
-    rotation: multiply(trs.rotation, QUARTER_X),
-    scale: [x, z, y],
+    rotation: [...trs.rotation],
+    scale: trs.scale.map((value, axis) => (undo ? value / fit.scale[axis] : value * fit.scale[axis])) as Vec3,
   };
 }
-
-/** This app's plane stood back up into XY, for a plane inside a group that holds the studio's transform. */
-function standPlane(): Trs {
-  return { translation: [0, 0, 0], rotation: [...QUARTER_X], scale: [1, 1, 1] };
-}
-
-/** +90° about X. */
-const QUARTER_X: Quat = [Math.SQRT1_2, 0, 0, Math.SQRT1_2];
 
 /**
  * A child's transform taken into its parent's space. Exact unless a parent is
@@ -349,6 +413,474 @@ function cameraView(world: Trs, camera: Record<string, unknown>): CameraView {
       position[2] + forward[2] * distance,
     ],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Writing a scene for the studio
+
+/**
+ * A model's files as the studio keeps them: an asset of its own, which every
+ * node placing those files shares.
+ */
+export interface StudioAsset {
+  uuid: string;
+  /** Where each file lands in the studio project, the .gltf first. */
+  paths: string[];
+  /** The files themselves, in the order of `paths`. */
+  files: Uint8Array[];
+}
+
+/** Where a model's files go in the studio project. */
+export interface StudioAssetPlace {
+  /** The project folder they go in. */
+  folder: string;
+  /** What the .gltf — and so its .bin — is called, extension aside. */
+  stem: string;
+}
+
+export interface StudioExportModel {
+  /** What its node is called. */
+  name: string;
+  /** Where it sits in the scene; models here hang off the scene itself. */
+  placement: Trs;
+  hidden: boolean;
+  asset: StudioAsset;
+}
+
+export interface StudioExport {
+  name: string;
+  objects: readonly SceneObject[];
+  /** The scene objects hidden in the preview, which the studio has hidden too. */
+  hiddenObjects: ReadonlySet<number>;
+  models: readonly StudioExportModel[];
+  camera: CameraView | null;
+  environment: EnvironmentSettings;
+}
+
+/** A node of the tree as it is written: everything the studio's own nodes carry. */
+interface StudioTreeNode {
+  id: string;
+  name: string;
+  type: string;
+  components: Record<string, unknown>;
+  children: StudioTreeNode[];
+}
+
+/** Where the studio's own projects keep models. */
+const MODELS_FOLDER = 'assets/models';
+
+/** The preview's field of view, so the studio's camera frames the scene the way the view did. */
+const CAMERA_FOV = 50;
+
+/** Looked at from a little way off, for a scene that has never been on screen. */
+const FALLBACK_VIEW: CameraView = { position: [0, 2, 5], target: [0, 0, 0] };
+
+/**
+ * Where a model's files go in the studio project: back where they came from,
+ * for a model the studio exported, so importing them there again offers to
+ * replace the originals; else a folder of their own under assets/models.
+ * `taken` holds the .gltf paths handed out already, lower-cased, so two
+ * different sets of files never land on one another.
+ */
+export function studioAssetPlace(projectPath: string | null, name: string, taken: Set<string>): StudioAssetPlace {
+  const claim = (place: StudioAssetPlace): boolean => {
+    const path = `${place.folder}/${place.stem}.gltf`.toLowerCase();
+    if (taken.has(path)) return false;
+    taken.add(path);
+    return true;
+  };
+  if (projectPath) {
+    const at = projectPath.replace(/\\/g, '/');
+    const place = {
+      folder: at.slice(0, Math.max(at.lastIndexOf('/'), 0)) || MODELS_FOLDER,
+      stem: baseName(at).replace(/\.(glb|gltf)$/i, '') || 'model',
+    };
+    if (claim(place)) return place;
+  }
+  const stem = plainFileName(name) || 'model';
+  for (let count = 1; ; count++) {
+    const place = { folder: `${MODELS_FOLDER}/${count === 1 ? stem : `${stem}_${count}`}`, stem };
+    if (claim(place)) return place;
+  }
+}
+
+/**
+ * Makes a model's written files an asset of the studio's. The studio unpacks
+ * an asset's files into its folder by name alone, and reads the paths a .gltf
+ * gives them unencoded — so each file it refers to sits right beside it, under
+ * a name that needs no encoding and is not taken twice.
+ *
+ * `written` is the .gltf, called `${place.stem}.gltf`, and every file it
+ * refers to, keyed by the path the .gltf spells it with.
+ */
+export function studioAsset(written: ReadonlyMap<string, Uint8Array>, place: StudioAssetPlace): StudioAsset {
+  const gltfName = `${place.stem}.gltf`;
+  const gltf = written.get(gltfName);
+  if (!gltf) throw new Error(`${gltfName} was not written`);
+  const json = JSON.parse(new TextDecoder().decode(gltf)) as {
+    buffers?: { uri?: string }[];
+    images?: { uri?: string }[];
+  };
+
+  const taken = new Set([gltfName.toLowerCase()]);
+  const renamed = new Map<string, string>();
+  // The .bin first, as the studio lists a model's files, then the textures.
+  const others = [...written.keys()].filter((path) => path !== gltfName);
+  others.sort((a, b) => Number(!/\.bin$/i.test(a)) - Number(!/\.bin$/i.test(b)));
+  for (const path of others) {
+    const name = plainFileName(baseName(path)) || 'file';
+    const dot = name.lastIndexOf('.');
+    const [stem, extension] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+    let free = name;
+    for (let count = 2; taken.has(free.toLowerCase()); count++) free = `${stem}_${count}${extension}`;
+    taken.add(free.toLowerCase());
+    renamed.set(path, free);
+  }
+  for (const entry of [...(json.buffers ?? []), ...(json.images ?? [])]) {
+    if (typeof entry.uri !== 'string' || entry.uri.startsWith('data:')) continue;
+    const name = renamed.get(decodeUri(entry.uri));
+    if (name) entry.uri = name;
+  }
+
+  const paths = [gltfName, ...renamed.values()].map((name) => `${place.folder}/${name}`);
+  const files = [
+    new TextEncoder().encode(JSON.stringify(json, null, 2)),
+    ...others.map((path) => written.get(path)!),
+  ];
+  return { uuid: crypto.randomUUID(), paths, files };
+}
+
+/**
+ * A zip the studio imports as a scene: the tree, the list of assets, and each
+ * asset's files in a folder named after it — along with what could not be
+ * carried over, for the message that follows the export.
+ */
+export async function writeStudioScene(scene: StudioExport): Promise<{ zip: Uint8Array; notes: string[] }> {
+  const id = crypto.randomUUID();
+  const children = [
+    ...objectNodes(scene.objects, scene.hiddenObjects),
+    cameraNode(scene.camera ?? FALLBACK_VIEW),
+    ...scene.models.map(modelNode),
+  ];
+  const main = {
+    name: scene.name,
+    id,
+    type: '3D',
+    root: { id: 'ROOT', name: 'ROOT', type: 'root', components: {}, children },
+    settings: sceneSettings(scene.environment),
+  };
+
+  const assets = [...new Set(scene.models.map((model) => model.asset))];
+  const zipPath = (asset: StudioAsset, path: string) => `${asset.uuid}/${baseName(path)}`;
+  const meta = {
+    type: 'scene',
+    main: `assets/.core/scenes3d/${id}.gsscene`,
+    assets: assets.map((asset, index) => ({
+      uuid: asset.uuid,
+      type: 'gltf',
+      assets: asset.paths,
+      assetsZipPaths: asset.paths.map((path) => zipPath(asset, path)),
+      index,
+    })),
+    stuffs: [],
+  };
+
+  const encoder = new TextEncoder();
+  const entries: Record<string, Uint8Array | [Uint8Array, { level: 0 }]> = {
+    [MAIN_FILE]: encoder.encode(JSON.stringify(main)),
+    [META_FILE]: encoder.encode(JSON.stringify(meta)),
+  };
+  for (const asset of assets) {
+    asset.paths.forEach((path, index) => {
+      const bytes = asset.files[index];
+      // Images are compressed already, so they are stored rather than deflated again.
+      entries[zipPath(asset, path)] = /\.(gltf|bin)$/i.test(path) ? bytes : [bytes, { level: 0 }];
+    });
+  }
+  const { zipSync } = await import('fflate');
+  return { zip: zipSync(entries, { level: 6 }), notes: exportNotes(scene) };
+}
+
+/** The scene's own objects as a tree of studio nodes, each under the one it hangs off. */
+function objectNodes(objects: readonly SceneObject[], hidden: ReadonlySet<number>): StudioTreeNode[] {
+  const byParent = new Map<number | null, SceneObject[]>();
+  for (const object of objects) {
+    const siblings = byParent.get(object.parent);
+    if (siblings) siblings.push(object);
+    else byParent.set(object.parent, [object]);
+  }
+
+  const build = (object: SceneObject): StudioTreeNode => {
+    const children = (byParent.get(object.id) ?? []).map(build);
+    const visible = !hidden.has(object.id);
+    const type = TYPE_OF_KIND[object.kind];
+    const components = objectComponents(object);
+    const fit = SHAPE_FIT[object.kind];
+    if (!fit) return studioNode(type, object.name, object.trs, visible, components, children);
+    if (children.length === 0) {
+      return studioNode(type, object.name, fitToStudio(object.trs, fit), visible, components);
+    }
+    // Its children were placed in this shape's frame, which the studio's shape
+    // does not share: a group keeps that frame, and holds the shape and them.
+    const shape = studioNode(type, object.name, fitToStudio(DEFAULT_TRS, fit), true, components);
+    return studioNode('node3D', object.name, object.trs, visible, {}, [shape, ...children]);
+  };
+  return (byParent.get(null) ?? []).map(build);
+}
+
+/** What a studio node of the object's type carries besides its transform, as the studio's own defaults spell it. */
+function objectComponents(object: SceneObject): Record<string, unknown> {
+  const color = object.color ?? '#ffffff';
+  const intensity = object.intensity ?? 1;
+  const castShadow = object.castShadow ?? false;
+  const target = { ...studioVec(object.target ?? [0, 0, 0]), linked: false };
+  const light = { light: { type: 'light', color, intensity } };
+  switch (object.kind) {
+    case 'group':
+      return {};
+    case 'box':
+    case 'sphere':
+    case 'cylinder':
+    case 'cone':
+    case 'plane':
+      // The studio's default material: shapes keep their shadows, not their colours.
+      return {
+        mesh: {
+          type: 'mesh',
+          geometry: 'default',
+          material: 'default',
+          castShadow,
+          receiveShadow: object.receiveShadow ?? false,
+        },
+      };
+    case 'ambient':
+      return light;
+    case 'directional':
+      return {
+        ...light,
+        directionalLight: {
+          type: 'directionalLight',
+          color,
+          intensity,
+          target,
+          debug: false,
+          castShadow,
+          bias: object.shadowBias ?? 0,
+          shadowMapSize: object.shadowMapSize ?? 1024,
+          // The studio's default: its shadow covers a fixed square, where the
+          // preview's is fitted to what casts.
+          shadowAreaSize: 20,
+        },
+      };
+    case 'hemisphere':
+      return {
+        hemisphereLight: {
+          type: 'hemisphereLight',
+          color,
+          groundColor: object.groundColor ?? '#ffffff',
+          intensity,
+        },
+      };
+    case 'point':
+      return {
+        ...light,
+        pointLight: {
+          type: 'pointLight',
+          color,
+          intensity,
+          distance: object.distance ?? 0,
+          decay: object.decay ?? 2,
+          debug: false,
+          castShadow,
+        },
+      };
+    case 'spot':
+      return {
+        ...light,
+        spotLight: {
+          type: 'spotLight',
+          color,
+          target,
+          intensity,
+          distance: object.distance ?? 0,
+          decay: object.decay ?? 2,
+          angle: object.angle ?? Math.PI / 3,
+          penumbra: object.penumbra ?? 0,
+          debug: false,
+          castShadow,
+          shadowMapSize: object.shadowMapSize ?? 1024,
+        },
+      };
+  }
+}
+
+/** The view as the scene's camera: where it was, looking where it looked. */
+function cameraNode(view: CameraView): StudioTreeNode {
+  return studioNode('perspectiveCamera', 'Camera', lookFrom(view.position, view.target), true, {
+    perspectiveCamera: {
+      type: 'perspectiveCamera',
+      fov: CAMERA_FOV,
+      aspect: 2,
+      near: 0.1,
+      far: 2000,
+      debug: false,
+    },
+  });
+}
+
+function modelNode(model: StudioExportModel): StudioTreeNode {
+  const { uuid, paths } = model.asset;
+  return studioNode('model', model.name, model.placement, !model.hidden, {
+    model: {
+      type: 'model',
+      stuffs: null,
+      stuffsDataId: '',
+      modelUUID: uuid,
+      modelPath: paths[0],
+      animations: {},
+      morphs: [],
+    },
+    modelTree: { type: 'modelTree', modelUUID: uuid, modelData: {} },
+  });
+}
+
+function studioNode(
+  type: string,
+  name: string,
+  trs: Trs,
+  visible: boolean,
+  components: Record<string, unknown>,
+  children: StudioTreeNode[] = [],
+): StudioTreeNode {
+  return {
+    id: crypto.randomUUID(),
+    name,
+    type,
+    components: { node3D: node3D(name, trs, visible), ...components },
+    children,
+  };
+}
+
+/** A node3D component: the transform, with the rotation as the studio keeps it — XYZ Euler angles in degrees. */
+function node3D(label: string, trs: Trs, visible: boolean): Record<string, unknown> {
+  const [x, y, z] = trs.scale;
+  const rotation = quaternionToEuler(trs.rotation).map((angle) => tidy(toDegrees(angle)));
+  return {
+    type: 'node3D',
+    label,
+    visible,
+    position: { ...studioVec(trs.translation), linked: false },
+    scale: { x, y, z, linked: x === y && y === z },
+    rotation: { ...studioVec(rotation), linked: false },
+    renderOrder: 0,
+    optionalLoad: false,
+    optionalLoadID: '',
+    optionalLoadValue: '',
+  };
+}
+
+/** A new studio scene's settings, with this scene's environment strength. */
+function sceneSettings(environment: EnvironmentSettings): Record<string, unknown> {
+  return {
+    type: 'scene',
+    backgroundType: 'solid',
+    backgroundColor1: '#FFFFFF',
+    backgroundColor2: '#FFFFFF',
+    backgroundImage: null,
+    backgroundVideo: null,
+    skyboxImage: null,
+    fog: false,
+    fogType: 'linear',
+    fogColor: '#FF0000',
+    fogNear: 10,
+    fogFar: 20,
+    fogDensity: 0.02,
+    // The studio's environment is a map from its assets; the room has none.
+    environment: null,
+    environmentIntensity: environment.mode === 'room' ? environment.intensity : 1,
+    hdrFile: null,
+    cubemap: null,
+    optionalLoad: false,
+    optionalLoadID: '',
+    optionalLoadValue: '',
+    render: {
+      type: 'default',
+      canvas: {
+        id: '',
+        zIndex: 0,
+        autoScale: false,
+        visible: true,
+        width: 800,
+        height: 800,
+        transparentBackground: false,
+      },
+    },
+  };
+}
+
+function exportNotes(scene: StudioExport): string[] {
+  const notes: string[] = [];
+  const coloured = scene.objects.some(
+    (object) => SCENE_OBJECT_KINDS[object.kind].category === 'mesh' && (object.color ?? '#ffffff') !== '#ffffff',
+  );
+  if (coloured) notes.push("Shapes go with the studio's default material — their colours stay behind.");
+  if (scene.environment.mode === 'room') {
+    notes.push('The room lighting stays behind: give the scene an environment map in the studio to match it.');
+  }
+  return notes;
+}
+
+/**
+ * The transform of a camera at `eye` looking at `target` with +Y up, the way
+ * three.js's lookAt turns one: it looks down its own -Z.
+ */
+function lookFrom(eye: Vec3, target: Vec3): Trs {
+  let z = normalize([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]) ?? [0, 0, 1];
+  let x = normalize(cross([0, 1, 0], z));
+  if (!x) {
+    // Straight up or down: three.js nudges the view off the axis the same way.
+    z = normalize([z[0], z[1], z[2] + 0.0001])!;
+    x = normalize(cross([0, 1, 0], z))!;
+  }
+  const y = cross(z, x);
+  const { rotation } = decomposeMatrix([...x, 0, ...y, 0, ...z, 0, 0, 0, 0, 1]);
+  return { translation: [...eye], rotation, scale: [1, 1, 1] };
+}
+
+function cross(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+/** The vector at length 1, or null when it has no direction. */
+function normalize(v: Vec3): Vec3 | null {
+  const length = Math.hypot(...v);
+  return length < 1e-9 ? null : [v[0] / length, v[1] / length, v[2] / length];
+}
+
+function studioVec([x, y, z]: readonly number[]): { x: number; y: number; z: number } {
+  return { x, y, z };
+}
+
+/** An angle without the float dust a round trip through a quaternion leaves on it, and never -0. */
+function tidy(degrees: number): number {
+  return Math.round(degrees * 1e9) / 1e9 || 0;
+}
+
+/**
+ * A file name that reads the same encoded or not — which is how the studio
+ * reads the ones a .gltf gives — and that every file system takes.
+ */
+function plainFileName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+}
+
+function decodeUri(uri: string): string {
+  try {
+    return decodeURIComponent(uri);
+  } catch {
+    // A lone '%' from a hand-edited file: take it literally.
+    return uri;
+  }
 }
 
 function multiply(a: Quat, b: Quat): Quat {

@@ -53,8 +53,9 @@ them (or step out to the parent / in to the first child), `Enter`, `F2` or just
 typing opens the name, `Enter` or `Esc` closes it again. While a name is open
 `←`/`→` belong to the caret, so they never interrupt typing. `F` frames the
 selection (or everything), `W`/`E`/`R` switch the gizmo between move, rotate and
-scale, `Space` plays and pauses the model's animation, `Delete` (or
-`Backspace`) deletes the selection, `Esc` clears it, `Ctrl`+`S` downloads,
+scale — on a picked row too, so those four letters never open its name — `Space` plays and pauses the model's animation, `Delete` (or
+`Backspace`) deletes the selection, `Ctrl`+`C` and `Ctrl`+`V` copy and paste it,
+`Esc` clears it, `Ctrl`+`S` downloads,
 `Ctrl`+`Z` undoes the last change and `Ctrl`+`Y` (or `Ctrl`+`Shift`+`Z`) redoes it.
 
 ## Features
@@ -76,6 +77,7 @@ scale, `Space` plays and pauses the model's animation, `Delete` (or
   hand, and rename it
 - Delete objects and mesh data with `Delete`, **Edit → Delete** or the panel's
   **Delete** button, and take it back with `Ctrl`+`Z`
+- Copy and paste objects with `Ctrl`+`C` / `Ctrl`+`V` or **Edit → Copy / Paste**
 - Edit any name inline — click to pick a row, click its name again to rename —
   with per-name revert and one-click reset
 - **Reset all** puts the whole file back the way it was opened — names,
@@ -166,6 +168,21 @@ times opens eight times, each row named after its node), and the studio's
 camera is the view it opens at. Scripts, fog and the background have no
 counterpart here and are left out, which the import says.
 
+### Exporting a studio scene
+
+**File → Export studio scene** downloads the scene on show as a `.zip` the
+studio's scene import takes. Its lights, shapes and groups go as the studio's
+own nodes, every open model goes as a model node where it sits, and the view
+goes as the scene's camera. Each model is written as a `.gltf` with its `.bin`
+and textures beside it — the file as the plain Download writes it, every edit
+in, nothing re-encoded — and models whose files come out the same, such as the
+instances of one file, share one asset. A model that came in with a studio scene
+goes back to the path it had in the studio project, so importing the zip there
+offers to replace the original; any other goes in a folder of its own under
+`assets/models`. Shapes take the studio's default material, so their colours
+stay behind, and so does the room lighting, which the studio has no map for;
+the export says so when it matters.
+
 ### Outliner
 
 The **Scene** tab shows an outliner rooted at the one Scene, then a row per open
@@ -181,7 +198,7 @@ row to the selection or takes it out; `Shift`+click selects every row on screen
 from the last one clicked to this one, and `Ctrl`+`Shift`+click adds that run to
 what is selected already. Every selected row is lit and boxed in yellow in the
 viewport; the one picked last is the one the properties panel and the gizmo
-show. **Delete**, **Isolate** and **Frame** act on all of them — scene objects,
+show. **Copy**, **Delete**, **Isolate** and **Frame** act on all of them — scene objects,
 objects and mesh data across models alike, while a whole model in the selection
 is closed — and `Ctrl`+`Z` brings back everything one delete took, at once.
 
@@ -273,8 +290,10 @@ tabs geometry and material.
 Each tab renames its own entry and shows its index, plus type and child count
 for a node and primitive count for a mesh — with a visibility checkbox, a
 **Shadow** row for a node that draws a mesh (see **Shadows** below), and
-Frame / Isolate buttons. A material's tab is its whole editor; see **Materials**
-below.
+Frame / Isolate buttons. Once it has isolated, **Isolate** reads **Show all**,
+so a second click brings everything back; showing or hiding anything else, or
+picking something else, turns it back into Isolate. A material's tab is its
+whole editor; see **Materials** below.
 
 A mesh with several materials repeats the outliner's dropdown at the top of its
 **material** tab, so which one you are editing is a choice you can make from
@@ -341,6 +360,31 @@ changes: the geometry stays in the binary data, unreferenced, so the download is
 no smaller. Materials and textures stay as well, under "Not in the file’s scene"
 when nothing uses them any more. References held inside vendor extensions
 (`MSFT_lod`, `KHR_animation_pointer`) are not followed.
+
+### Copying and pasting
+
+`Ctrl`+`C` (or **Edit → Copy**) copies the selected objects with everything
+under them; `Ctrl`+`V` (or **Edit → Paste**) pastes them and selects the copies.
+A paste goes beside what is selected — its sibling, right after it — so pasting
+straight after copying puts the copy on top of the original, ready to be moved.
+With nothing selected in that file, it goes back under whatever the original
+hung off. `Ctrl`+`Z` takes the whole paste back.
+
+- An object pastes back into **the file it came from**: its geometry is in that
+  file's binary data, which no other file can point at. The scene's own lights,
+  shapes and groups paste into whichever scene is on show
+- The copy draws the **same mesh data** as the original — nothing is duplicated
+  but the JSON entries, so the download barely grows. Mesh data deleted since
+  the copy was taken comes back with the paste, so copy, delete and paste moves
+  an object to another parent
+- A copied root is named "Tree copy", then "Tree copy 2"; what is under it keeps
+  its names. Scene objects are named the way new ones are: "Box 2", "Box 3"
+- The copy plays in **every animation its original plays in**, from the same
+  keyframes
+- A skinned object copied **with its skeleton** gets a skin of its own, so the
+  copy moves on its own. Copied without it, the copy stays skinned to the
+  original's bones
+- Mesh data and materials on their own, and whole models, are not copied
 
 ### Materials
 
@@ -537,9 +581,14 @@ The viewport is always live, and answers "which name is this?":
   to feel the difference between the three
 - Toggle visibility per node or mesh. When something is hidden because its
   parent is hidden, the row says so, and clicking its eye reveals the parent
-- **Isolate** the selection, **Show all**, **Frame** and a grid toggle, from the
-  toolbar under the viewport or the **View** menu
-- Visibility is preview-only and never changes the exported file
+- **Isolate** the selection, **Show all** and a grid toggle, from the toolbar
+  under the viewport or the **View** menu. `F` frames the selection; the scene
+  row's locate button frames everything
+- Shading, as in the three.js editor's viewport: **Solid** draws the materials,
+  **Normals** colours every surface by the way it faces — the quickest way to
+  spot flipped or broken normals — and **Wireframe** shows the triangles. From
+  the toolbar's dropdown or the **View** menu
+- Visibility and shading are preview-only and never change the exported file
 
 The preview needs the actual geometry, so for a `.gltf` with external files it
 asks for them — dropping the model's folder in is usually all it takes, and

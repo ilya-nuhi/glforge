@@ -34,13 +34,15 @@ import type { Collection } from './remove';
 import type { EnvironmentSettings, SceneObject } from './scene';
 import type { ShadowFlags, ShadowSettings } from './shadow';
 import type { NodeTransformKeys } from './transform';
-import type { CameraView, GizmoMode, NodeTrs, SelectionRef } from './viewer';
+import type { CameraView, GizmoMode, NodeTrs, SelectionRef, Shading } from './viewer';
 
 export interface SourceRecord {
   stamp: number;
   fileName: string;
   /** The node of a studio scene the model was imported as, if it was. */
   sceneName?: string;
+  /** Where the studio project keeps the file, for a model imported with a studio scene. */
+  studioPath?: string;
   /** The path the model sat at in what was dropped, for the folder view. */
   filePath?: string;
   /** Its size in bytes; a .gltf text does not give one back on its own. */
@@ -72,6 +74,8 @@ export interface DocRecord {
   deleted?: number;
   /** Animations copied. Absent in records from before copying. */
   copied?: number;
+  /** Objects pasted. Absent in records from before pasting. */
+  pasted?: number;
   /**
    * Current index → the file's own, for each collection a delete renumbered:
    * what pairs a restored entry with the name the file gave it.
@@ -92,6 +96,8 @@ export interface ViewRecord {
   placements?: { model: number; trs: NodeTrs }[];
   tab: string;
   gridVisible: boolean;
+  /** How the viewport draws meshes. Absent in records from before it could be changed. */
+  shading?: Shading;
   selection: SelectionRef | null;
   /** The scene object picked, by id, when the selection is one of those instead. */
   object?: number | null;

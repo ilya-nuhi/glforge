@@ -41,7 +41,16 @@ import {
   type MaterialType,
 } from './material';
 import { collectDroppedFiles, pickedFromList, type PickedFile } from './files';
-import { isStudioScene, readStudioScene, type StudioScene } from './studio';
+import {
+  isStudioScene,
+  readStudioScene,
+  studioAsset,
+  studioAssetPlace,
+  writeStudioScene,
+  type StudioAsset,
+  type StudioExportModel,
+  type StudioScene,
+} from './studio';
 import {
   ANISOTROPY_EXTRAS,
   CLAMP_TO_EDGE,
@@ -119,6 +128,7 @@ import {
   type Collection,
   type Removal,
 } from './remove';
+import { copyNodes, pasteNodes, type NodeClip, type Pasted } from './paste';
 import {
   animationLength,
   bakeTrims,
@@ -169,6 +179,7 @@ import {
   writeWeight,
 } from './morph';
 import { buildHierarchy, meshMaterials, type EntryUse } from './tree';
+import { loaderNodeNames } from './loader-names';
 import type {
   CameraView,
   ClipInfo,
@@ -176,10 +187,18 @@ import type {
   HiddenState,
   NodeTrs,
   SelectionRef,
+  Shading,
   TargetKind,
   Viewer,
 } from './viewer';
-import { initCompression, type Compression, type EncodedImage } from './compress';
+import {
+  createGltfWriter,
+  initCompression,
+  prepareSource,
+  sourceDigest,
+  type Compression,
+  type EncodedImage,
+} from './compress';
 import './style.css';
 
 /**
@@ -257,6 +276,11 @@ interface Model {
    * instances of one file the scene places; null for a file opened on its own.
    */
   sceneName: string | null;
+  /**
+   * Where the studio project keeps its file, for a model that came in with a
+   * studio scene and the export said: a scene exported back puts it there again.
+   */
+  studioPath: string | null;
   /** Where it sat in what was dropped, for the Files tab. */
   path: string;
   /** Its size in bytes, or -1 when a restored session did not record one. */
@@ -294,6 +318,8 @@ interface Model {
   deletedCount: number;
   /** Animations copied since the file was opened. */
   copiedAnimations: number;
+  /** Objects pasted since the file was opened, everything under them counted. */
+  pastedCount: number;
   /**
    * Where each entry sat in the file as opened, for the collections a delete has
    * renumbered — current index → the file's own. A restored session pairs names
@@ -498,10 +524,10 @@ const modelPickers = [
   { row: $('#tools-model-row'), select: $<HTMLSelectElement>('#tools-model-select') },
 ];
 const toolbar = $('#toolbar');
-const frameBtn = $('#frame-btn');
 const isolateBtn = $<HTMLButtonElement>('#isolate-btn');
 const showAllBtn = $<HTMLButtonElement>('#show-all-btn');
 const gridBtn = $<HTMLButtonElement>('#grid-btn');
+const shadingSelect = $<HTMLSelectElement>('#shading-select');
 const gizmoButtons: Record<GizmoMode, HTMLButtonElement> = {
   translate: $<HTMLButtonElement>('#move-btn'),
   rotate: $<HTMLButtonElement>('#rotate-btn'),
@@ -619,6 +645,8 @@ let propObject: {
   fields: Record<TrsPart, HTMLInputElement[]> | null;
   visible: HTMLInputElement;
 } | null = null;
+/** The panel's Isolate, which reads Show all while what it isolated stays that way. */
+let propIsolate: { button: HTMLButtonElement; ref: SelectionRef; title: string } | null = null;
 
 /** Every row below the Scene row, in the order they are shown: the scene's objects, then each model's. */
 let rows: OutlinerRow[] = [];
@@ -630,6 +658,14 @@ let asideLabels = new Map<NamedEntry, AsideLabel[]>();
 let noteGroups: { el: HTMLElement; rows: Row[] }[] = [];
 let collapsedRows = new Set<number>();
 let allCollapsed = false;
+/**
+ * What three.js calls each document's nodes, worked out when first asked for.
+ * A rename drops its document's, since one name taken can renumber others; a
+ * rebuild drops them all.
+ */
+let loaderNames = new WeakMap<GltfJson, Map<NamedEntry, string>>();
+/** Models whose fields are still to be shown the names three.js now gives them. */
+const staleShownNames = new Set<Model>();
 
 let propFields: PropField[] = [];
 let propToggles: PropToggle[] = [];
@@ -670,11 +706,17 @@ let selection: SelectionRef | null = null;
 /**
  * What else is selected, besides `selection` or `pickedObject` — rows added
  * with Ctrl+click or Shift+click. The panel and the gizmo stay with the one
- * picked last; Delete, Isolate and Frame take all of them.
+ * picked last; Copy, Delete, Isolate and Frame take all of them.
  */
 let extraPicks: SelectionItem[] = [];
 /** Where a Shift+click range starts: the row last clicked on its own, or with Ctrl. */
 let selectAnchor: SelectionItem | null = null;
+/**
+ * What Copy last took: scene objects, and objects out of each model by its id.
+ * It outlives scene switches, so the scene's own objects can be pasted into
+ * another scene; a model's part waits for that model to be open again.
+ */
+let clipboard: { objects: SceneObject[]; models: Map<number, NodeClip> } | null = null;
 /**
  * The outliner's Scene row: the one scene every model is in, which belongs to
  * none of them. Picking it selects no model, so it is tracked apart.
@@ -693,6 +735,10 @@ let selectedFilePath: string | null = null;
 let previewFile: { path: string; file: File; url: string } | null = null;
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
 let gridVisible = true;
+/** How the viewport draws meshes — one setting for every model, like the grid. */
+let shading: Shading = 'solid';
+/** Every shading, in the order the toolbar and the View menu list them. */
+const SHADINGS: Shading[] = ['solid', 'normals', 'wireframe'];
 /** Whether a clip starts over at its end — one setting for every model, like the grid. */
 let animationLoop = true;
 /** Clip seconds per real second, and which way they run — for every model, like looping. */
@@ -882,6 +928,7 @@ async function importStudioScene(picked: PickedFile[]): Promise<void> {
     try {
       const model = await readModel(entry.file, entry.sidecars);
       model.sceneName = entry.name;
+      model.studioPath = entry.projectPath;
       model.placement = entry.placement;
       opened.push({ model, hidden: entry.hidden });
     } catch (error) {
@@ -962,6 +1009,7 @@ function createModel(file: ModelFile): Model {
   return {
     ...file,
     sceneName: null,
+    studioPath: null,
     addedImages: new Map(),
     imageUrls: new Map(),
     mapEdits: 0,
@@ -971,6 +1019,7 @@ function createModel(file: ModelFile): Model {
     morphedMeshes: new Set(),
     deletedCount: 0,
     copiedAnimations: 0,
+    pastedCount: 0,
     origins: {},
     sceneIndex: sceneIndexFor(file.json),
     placement: null,
@@ -1088,12 +1137,76 @@ function getName(entry: NamedEntry): string {
 }
 
 /**
+ * The name an entry is shown by. A node goes by the name three.js gives it,
+ * which is what the editor's outliner shows and what `getObjectByName` finds —
+ * see loader-names.ts. Everything else, and a node three.js never loads, goes by
+ * the name the file holds.
+ */
+function shownName(model: Model, entry: NamedEntry): string {
+  let names = loaderNames.get(model.json);
+  if (!names) {
+    names = loaderNodeNames(model.json);
+    loaderNames.set(model.json, names);
+  }
+  return names.get(entry) ?? getName(entry);
+}
+
+/**
+ * Has every field of the model show the names three.js now gives its nodes,
+ * once whatever is renaming is done: a reset or a replace renames many things
+ * in one go, and the names are worked out again once for all of them.
+ */
+function scheduleShownNames(model: Model): void {
+  loaderNames.delete(model.json);
+  if (staleShownNames.size === 0) queueMicrotask(repaintShownNames);
+  staleShownNames.add(model);
+}
+
+function repaintShownNames(): void {
+  const stale = new Set(staleShownNames);
+  staleShownNames.clear();
+  // A name being typed stays as typed; it shows what three.js makes of it once
+  // the field is left (settleNameEdit).
+  const active = document.activeElement;
+  const typing = active instanceof HTMLInputElement && !active.readOnly ? active : null;
+  for (const row of rows) {
+    if (isObjectRow(row) || !stale.has(row.model) || row.input === typing) continue;
+    paintShownName(row);
+  }
+  for (const field of propFields) {
+    if (stale.has(field.model) && field.input !== typing) paintFieldName(field.model, field.entry, field.input);
+  }
+}
+
+/** Puts the name a row's entry is shown by in its field, if it is not there already. */
+function paintShownName(row: Row): void {
+  const shown = shownName(row.model, row.entry);
+  if (row.input.value === shown) return;
+  row.input.value = shown;
+  updateRowState(row);
+  if (row.fitted) fitNameField(row.input);
+}
+
+/** The same for a field in the properties panel, which says what the file holds when it differs. */
+function paintFieldName(model: Model, entry: NamedEntry, input: HTMLInputElement): void {
+  input.value = shownName(model, entry);
+  const stored = getName(entry);
+  input.title = input.value === stored ? '' : `In the file: ${stored || '(unnamed)'}`;
+}
+
+/** What a related entry is called on a button or in a message: the name it is shown by. */
+function targetName(model: Model, kind: TargetKind, index: number): string {
+  const entry = entryFor(model, kind, index);
+  return entry ? shownName(model, entry) : '';
+}
+
+/**
  * Writes a name into the document and mirrors it onto every other row and
  * properties field showing the same entry. The original shape is preserved: an
  * entry that genuinely had `"name": ""` keeps the key, one that never had a
  * name does not gain an empty one.
  */
-function setEntryName(entry: NamedEntry, value: string, source?: HTMLInputElement): void {
+function setEntryName(model: Model, entry: NamedEntry, value: string, source?: HTMLInputElement): void {
   const siblings = rowsByEntry.get(entry) ?? [];
   const hadName = siblings[0]?.hadName ?? keptOriginal(entry)?.had ?? typeof entry.name === 'string';
   if (value === '' && !hadName) delete entry.name;
@@ -1127,6 +1240,9 @@ function setEntryName(entry: NamedEntry, value: string, source?: HTMLInputElemen
     paintClipName(clipRow);
     paintAnimationsSummary();
   }
+  // The fields above hold the name as written; a node's then goes back to the
+  // name three.js gives it, and any other node whose name this renumbers follows.
+  scheduleShownNames(model);
 }
 
 /**
@@ -1155,16 +1271,25 @@ function applyNameEdit(model: Model, entry: NamedEntry, input: HTMLInputElement)
     input.title = `Material ${model.json.materials!.indexOf(clash)} is already named "${input.value}"`;
     return;
   }
-  setEntryName(entry, input.value, input);
+  setEntryName(model, entry, input.value, input);
   noteEdit(model);
 }
 
-/** Leaving a field with a rejected name in it puts the document's name back. */
+/**
+ * Leaving a field with a rejected name in it puts the document's name back.
+ * Leaving one with an accepted name has it show that name the way three.js
+ * reads it, which is not always as it was typed.
+ */
 function settleNameEdit(model: Model, entry: NamedEntry, input: HTMLInputElement): void {
-  if (!input.classList.contains('invalid')) return;
+  if (!input.classList.contains('invalid')) {
+    const row = rowsByEntry.get(entry)?.find((other) => other.input === input);
+    if (row) paintShownName(row);
+    else paintFieldName(model, entry, input);
+    return;
+  }
   const kept = getName(entry);
   const typed = input.value;
-  setEntryName(entry, kept);
+  setEntryName(model, entry, kept);
   noteEdit(model);
   showFlash(`"${typed}" is another material's name — kept "${kept || '(unnamed)'}"`);
 }
@@ -1190,6 +1315,9 @@ function buildEditor(): void {
   rowsByEntry = new Map();
   rowsByTarget = new Map();
   asideLabels = new Map();
+  // A rebuild follows edits that leave no name to drop the names by — a delete,
+  // an undo — so what three.js calls each node is worked out afresh.
+  loaderNames = new WeakMap();
   noteGroups = [];
   collapsedRows = new Set();
   allCollapsed = allCollapsed && collapsed.size > 0;
@@ -1482,7 +1610,7 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
 
   const input = document.createElement('input');
   input.type = 'text';
-  input.value = getName(spec.entry);
+  input.value = shownName(spec.model, spec.entry);
   input.placeholder = '(unnamed)';
   input.spellcheck = false;
   // A name is a label until the row is picked a second time; see beginRename.
@@ -1583,9 +1711,9 @@ function addRow(list: HTMLUListElement, spec: RowSpec): Row {
     settleNameEdit(row.model, row.entry, input);
   });
 
-  // Only a restored row can already differ from the file, so the usual path
-  // pays nothing for this.
-  if (row.original !== input.value) updateRowState(row);
+  // Only a restored row, or a node three.js renames, can already differ from
+  // the file, so the usual path pays nothing for this.
+  if (row.original !== getName(spec.entry) || input.value !== getName(spec.entry)) updateRowState(row);
 
   rows.push(row);
   const siblings = rowsByEntry.get(spec.entry);
@@ -1910,11 +2038,17 @@ function placeholderSlot(modifier: string): HTMLSpanElement {
 }
 
 function updateRowState(row: Row): void {
-  const modified = row.input.value !== row.original;
+  // The document's name, not the field's: a node's field shows the name three.js
+  // gives it, which need not be the one the file holds.
+  const stored = getName(row.entry);
+  const modified = stored !== row.original;
   row.el.classList.toggle('modified', modified);
   row.revertBtn.hidden = !modified;
   row.revertBtn.title = `Revert to "${row.original || '(unnamed)'}"`;
-  row.input.title = modified ? `Original: ${row.original || '(unnamed)'}` : '';
+  const notes: string[] = [];
+  if (row.input.value !== stored) notes.push(`In the file: ${stored || '(unnamed)'}`);
+  if (modified) notes.push(`Original: ${row.original || '(unnamed)'}`);
+  row.input.title = notes.join('\n');
 }
 
 function modifiedCount(model: Model): number {
@@ -1963,7 +2097,16 @@ function updateFileStats(): void {
   }
   const modified = modifiedCount(model);
   if (modified > 0) parts.push(`${modified} renamed`);
-  const { mapEdits, editedMaterials, movedNodes, shadowEdits, morphedMeshes, deletedCount, copiedAnimations } = model;
+  const {
+    mapEdits,
+    editedMaterials,
+    movedNodes,
+    shadowEdits,
+    morphedMeshes,
+    deletedCount,
+    copiedAnimations,
+    pastedCount,
+  } = model;
   if (mapEdits > 0) parts.push(`${mapEdits} texture change${mapEdits === 1 ? '' : 's'}`);
   if (editedMaterials.size > 0) {
     parts.push(`${editedMaterials.size} material${editedMaterials.size === 1 ? '' : 's'} edited`);
@@ -1972,6 +2115,7 @@ function updateFileStats(): void {
   if (morphedMeshes.size > 0) parts.push(`${morphedMeshes.size} morph change${morphedMeshes.size === 1 ? '' : 's'}`);
   if (deletedCount > 0) parts.push(`${deletedCount} deleted`);
   if (copiedAnimations > 0) parts.push(`${copiedAnimations} copied`);
+  if (pastedCount > 0) parts.push(`${pastedCount} pasted`);
   const trimmed = trimmedCount(model);
   if (trimmed > 0) parts.push(`${trimmed} trimmed`);
   fileStatsEl.textContent = parts.join(' · ') || '—';
@@ -1984,13 +2128,15 @@ function trimmedCount(model: Model): number {
 
 /**
  * The viewport's bottom-left read-out: the same scene statistics the three.js
- * editor shows. Labels never change, so the lines are built once and only the
- * numbers are rewritten — the render time is rewritten every frame.
+ * editor shows, plus draw calls. Labels never change, so the lines are built
+ * once and only the numbers are rewritten — draw calls and the render time are
+ * rewritten every frame.
  */
 const statusFields = {
   objects: statusLine('objects'),
   vertices: statusLine('vertices'),
   triangles: statusLine('triangles'),
+  drawCalls: statusLine('draw calls'),
   renderTime: statusLine('render time'),
 };
 
@@ -2011,6 +2157,7 @@ function updateStatus(): void {
   statusFields.objects.textContent = stats ? formatCount(stats.objects) : '—';
   statusFields.vertices.textContent = stats ? formatCount(stats.vertices) : '—';
   statusFields.triangles.textContent = stats ? formatCount(stats.triangles) : '—';
+  statusFields.drawCalls.textContent = stats ? formatCount(stats.drawCalls) : '—';
   statusFields.renderTime.textContent = stats ? `${stats.renderTime.toFixed(2)} ms` : '—';
 }
 
@@ -2507,6 +2654,7 @@ function applyFilter(): void {
     row.filtered =
       query === '' ||
       row.input.value.toLowerCase().includes(query) ||
+      getName(row.entry).toLowerCase().includes(query) ||
       row.original.toLowerCase().includes(query) ||
       // Mesh data and materials have no rows here any more, so the row naming
       // them answers for them.
@@ -2652,7 +2800,7 @@ function replaceAll(): void {
       continue;
     }
     undo.push({ model: row.model, entry: row.entry, value: current });
-    setEntryName(row.entry, next);
+    setEntryName(row.model, row.entry, next);
   }
   // Scenes have no rows, so they answer to the filter by their names alone.
   const query = searchInput.value.trim().toLowerCase();
@@ -2663,7 +2811,7 @@ function replaceAll(): void {
       const next = replacer(current);
       if (next === current) continue;
       undo.push({ model, entry: scene, value: current });
-      setEntryName(scene, next);
+      setEntryName(model, scene, next);
     }
   }
   for (const model of new Set(undo.map((step) => step.model))) noteEdit(model);
@@ -2708,12 +2856,7 @@ async function exportModel(model: Model | null = activeModel): Promise<void> {
       });
     }
 
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${exportBaseName(model)}.${isGlb ? 'glb' : 'gltf'}`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    saveBlob(blob, `${exportBaseName(model)}.${isGlb ? 'glb' : 'gltf'}`);
 
     // A .gltf keeps its references, so added images stay separate files.
     if (!isGlb && addedImages.size > 0) {
@@ -2783,6 +2926,91 @@ function exportBaseName(model: Model): string {
   return model.fileName.replace(/\.(glb|gltf)$/i, '') || 'model';
 }
 
+function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Set while a studio export is being written, so a second one is not started over it. */
+let studioExporting = false;
+
+/**
+ * Downloads the scene on show as a .zip the studio's scene import takes: its
+ * lights, shapes and groups, every open model where it sits, and the view as
+ * its camera. Each model goes as a .gltf with its .bin and textures, written
+ * from what the plain Download would write; models that write the same files —
+ * instances of one file — share one asset, as they do in the studio.
+ */
+async function exportStudioScene(): Promise<void> {
+  if (studioExporting || (models.length === 0 && !sceneStarted)) return;
+  studioExporting = true;
+  hideError();
+  const writer = createGltfWriter();
+  const assets = new Map<string, StudioAsset>();
+  const takenPaths = new Set<string>();
+  const placed: StudioExportModel[] = [];
+  let current: Model | null = null;
+  try {
+    for (const [index, model] of models.entries()) {
+      current = model;
+      showFlash(`Exporting for the studio… model ${index + 1} of ${models.length}`);
+      const prepared = await prepareSource(model, await studioFile(model), await readAddedImages(model));
+      const digest = await sourceDigest(prepared.source);
+      let asset = assets.get(digest);
+      if (!asset) {
+        const place = studioAssetPlace(model.studioPath, exportBaseName(model), takenPaths);
+        asset = studioAsset(await writer.write(prepared, place.stem), place);
+        assets.set(digest, asset);
+      }
+      placed.push({
+        name: model.sceneName ?? exportBaseName(model),
+        placement: model.placement ?? DEFAULT_TRS,
+        hidden: viewer?.isModelHidden(model.id) ?? false,
+        asset,
+      });
+    }
+    current = null;
+
+    const scene = activeScene();
+    const hiddenObjects = sceneObjects.filter((object) => viewer?.isObjectHidden(object.id));
+    const { zip, notes } = await writeStudioScene({
+      name: scene.name,
+      objects: sceneObjects,
+      hiddenObjects: new Set(hiddenObjects.map((object) => object.id)),
+      models: placed,
+      camera: viewer?.view() ?? pendingView,
+      environment,
+    });
+    saveBlob(new Blob([zip as Uint8Array<ArrayBuffer>], { type: 'application/zip' }), `${scene.name}.zip`);
+    showFlash(
+      [
+        `Exported ${scene.name} for the studio: ${plural(placed.length, 'model')} (${plural(assets.size, 'model file')}), ${plural(sceneObjects.length, 'object')}.`,
+        ...notes,
+      ].join(' '),
+    );
+  } catch (error) {
+    const which = current ? ` — ${modelLabel(current)}` : '';
+    showError(`Could not export for the studio${which}: ${messageOf(error)}`);
+  } finally {
+    writer.close();
+    studioExporting = false;
+  }
+}
+
+/**
+ * The file as Download writes it, opening on the glTF scene the preview shows,
+ * since that one is all the studio shows.
+ */
+async function studioFile(model: Model): Promise<{ json: GltfJson; chunks: GlbChunk[] }> {
+  const file = await withBakedTrims(model);
+  if ((file.json.scenes?.length ?? 0) <= 1) return file;
+  return { ...file, json: { ...file.json, scene: model.sceneIndex } };
+}
+
 /**
  * Whether anything other than a name has changed, which the preview must show.
  * A trim is not among them: the preview plays it without being given the edited
@@ -2796,7 +3024,8 @@ function hasStructuralEdits(model: Model): boolean {
     model.shadowEdits.size > 0 ||
     model.morphedMeshes.size > 0 ||
     model.deletedCount > 0 ||
-    model.copiedAnimations > 0
+    model.copiedAnimations > 0 ||
+    model.pastedCount > 0
   );
 }
 
@@ -2825,11 +3054,11 @@ function mimeTypeOf(file: File): string {
 function resetAll(model: Model | null = activeModel): void {
   if (!model) return;
   for (const [entry, entryRows] of rowsByEntry) {
-    if (entryRows[0].model === model) setEntryName(entry, entryRows[0].original);
+    if (entryRows[0].model === model) setEntryName(model, entry, entryRows[0].original);
   }
   for (const entry of rowlessEntries(model)) {
     const kept = model.originalNames?.get(entry);
-    if (kept) setEntryName(entry, kept.name);
+    if (kept) setEntryName(model, entry, kept.name);
   }
   noteEdit(model);
   updateMenus();
@@ -2907,6 +3136,7 @@ function resetModel(model: Model | null = activeModel): void {
   model.morphedMeshes = new Set();
   model.deletedCount = 0;
   model.copiedAnimations = 0;
+  model.pastedCount = 0;
   model.origins = {};
   if (propTransform?.model === model) propTransform = null;
   if (pendingSlot?.model === model) pendingSlot = null;
@@ -3049,6 +3279,7 @@ function resetWorkspace(): void {
   sceneStarted = false;
   pickedObject = null;
   propObject = null;
+  propIsolate = null;
   closeAddMenu();
   viewport.classList.remove('busy');
   outlinerEl.textContent = '';
@@ -3110,6 +3341,7 @@ interface ModelState {
   morphedMeshes: number[];
   deletedCount: number;
   copiedAnimations: number;
+  pastedCount: number;
   origins: Origins;
   /** The files themselves are not copied: a File never changes. */
   addedImages: [number, File][];
@@ -3162,6 +3394,7 @@ function captureModel(model: Model): ModelState {
     morphedMeshes: [...model.morphedMeshes],
     deletedCount: model.deletedCount,
     copiedAnimations: model.copiedAnimations,
+    pastedCount: model.pastedCount,
     origins: structuredClone(model.origins),
     addedImages: [...model.addedImages],
     placement: model.placement ? structuredClone(model.placement) : null,
@@ -3324,6 +3557,7 @@ function restoreModelState(model: Model, state: ModelState): void {
   model.morphedMeshes = new Set(live.morphedMeshes);
   model.deletedCount = live.deletedCount;
   model.copiedAnimations = live.copiedAnimations;
+  model.pastedCount = live.pastedCount;
   model.origins = live.origins;
   const imagesChanged =
     state.addedImages.length !== model.addedImages.size ||
@@ -3783,6 +4017,7 @@ async function saveSourceRecord(model: Model): Promise<void> {
     stamp: model.id,
     fileName: model.fileName,
     sceneName: model.sceneName ?? undefined,
+    studioPath: model.studioPath ?? undefined,
     filePath: model.path,
     fileSize: model.size,
     isGlb: model.isGlb,
@@ -3820,6 +4055,7 @@ async function saveDocRecord(model: Model): Promise<void> {
       morphs: [...model.morphedMeshes],
       deleted: model.deletedCount,
       copied: model.copiedAnimations,
+      pasted: model.pastedCount,
       origins: model.origins,
     }),
   );
@@ -3840,6 +4076,7 @@ function viewRecord(): ViewRecord {
     ),
     tab: sidebarTab,
     gridVisible,
+    shading,
     selection,
     object: pickedObject,
     scene: { objects: sceneObjects, environment, shadows, started: sceneStarted },
@@ -3960,6 +4197,7 @@ function applySession({ models: stored, view, scenes }: Session): void {
 
   if (view) {
     setGridVisible(view.gridVisible !== false);
+    setShading(isShading(view.shading) ? view.shading : 'solid');
     if (view.gizmo) {
       setGizmoMode(view.gizmo.mode);
       setGizmoSpace(view.gizmo.space);
@@ -3983,6 +4221,7 @@ function applySession({ models: stored, view, scenes }: Session): void {
       model.morphedMeshes.size +
       model.deletedCount +
       model.copiedAnimations +
+      model.pastedCount +
       trimmedCount(model);
   }
   const names = sessionLabel() ?? all[0]?.fileName ?? 'the scene';
@@ -4085,11 +4324,13 @@ function restoreModel({ source, doc }: StoredModel, view: ViewRecord | null): Mo
     resources: new Map((source.resources ?? []).map(({ path, file }) => [path, file])),
   });
   model.sceneName = typeof source.sceneName === 'string' ? source.sceneName : null;
+  model.studioPath = typeof source.studioPath === 'string' ? source.studioPath : null;
   // Read before the originals are paired, since a delete moved the indices
   // they are paired by.
   model.origins = doc.origins ?? {};
   model.deletedCount = doc.deleted ?? 0;
   model.copiedAnimations = doc.copied ?? 0;
+  model.pastedCount = doc.pasted ?? 0;
   model.originalNames = captureOriginals(pristine, json, model.origins);
   model.addedImages = new Map((source.addedImages ?? []).map(({ index, file }) => [index, file]));
   model.mapEdits = doc.mapEdits ?? 0;
@@ -4174,6 +4415,7 @@ function ensureViewer(): Promise<Viewer> {
       },
     });
     created.setGridVisible(gridVisible);
+    created.setShading(shading);
     created.setGizmoMode(gizmoMode);
     created.setGizmoSpace(gizmoSpace);
     created.setGizmoEnabled(gizmoEnabled);
@@ -4492,6 +4734,19 @@ function setGridVisible(visible: boolean): void {
   gridBtn.classList.toggle('selected', visible);
   updateMenus();
   scheduleViewSave();
+}
+
+/** Solid, Normals or Wireframe, from the toolbar or the View menu. */
+function setShading(value: Shading): void {
+  shading = value;
+  viewer?.setShading(value);
+  shadingSelect.value = value;
+  updateMenus();
+  scheduleViewSave();
+}
+
+function isShading(value: unknown): value is Shading {
+  return (SHADINGS as unknown[]).includes(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -5344,7 +5599,7 @@ function paintMultiNote(): void {
   const count = allPicks().length;
   multiNote.hidden = count <= 1;
   if (count > 1) {
-    multiNote.textContent = `${count} selected — the panel shows the one picked last. Delete, Isolate and Frame act on all of them.`;
+    multiNote.textContent = `${count} selected — the panel shows the one picked last. Copy, Delete, Isolate and Frame act on all of them.`;
   }
 }
 
@@ -5534,6 +5789,7 @@ function renderProperties(): void {
   propToggles = [];
   propTransform = null;
   propObject = null;
+  propIsolate = null;
   propertiesEl.textContent = '';
 
   if (sceneSelected || whole || picked) {
@@ -5675,18 +5931,7 @@ function buildPropertyPanel(model: Model, kind: TargetKind, index: number): HTML
     if (selection) viewer?.frame(selection);
   });
 
-  const isolate = document.createElement('button');
-  isolate.type = 'button';
-  isolate.className = 'Button';
-  isolate.textContent = 'Isolate';
-  isolate.disabled = viewer === null;
-  isolate.addEventListener('click', () => {
-    if (!viewer || !selection) return;
-    viewer.isolate(selection);
-    refreshVisibilityState();
-  });
-
-  buttons.append(frame, isolate);
+  buttons.append(frame, isolateButton(selection ?? refForTarget(model, kind, index)));
   // Kept as a button as well as the Delete key, since a control nobody can see
   // is a control nobody uses.
   if (kind !== 'material') {
@@ -5754,16 +5999,7 @@ function buildModelPanel(model: Model): HTMLElement {
 
   // Only another file can be hidden to leave this one on its own.
   if (models.length > 1) {
-    const isolate = document.createElement('button');
-    isolate.type = 'button';
-    isolate.className = 'Button';
-    isolate.textContent = 'Isolate';
-    isolate.title = 'Hide every other model';
-    isolate.disabled = viewer === null;
-    isolate.addEventListener('click', () => {
-      viewer?.isolate({ model: model.id });
-      refreshVisibilityState();
-    });
+    const isolate = isolateButton({ model: model.id }, 'Hide every other model');
 
     const close = document.createElement('button');
     close.type = 'button';
@@ -5777,6 +6013,36 @@ function buildModelPanel(model: Model): HTMLElement {
   actions.append(spacer, buttons);
   panel.append(actions);
   return panel;
+}
+
+/**
+ * Isolate, which turns into Show all once it has — so the same click takes it
+ * back. Anything else shown or hidden since makes it an Isolate again, as does
+ * picking something other than what was isolated.
+ */
+function isolateButton(ref: SelectionRef, title = 'Show only this'): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'Button';
+  button.disabled = viewer === null;
+  button.addEventListener('click', () => {
+    if (!viewer) return;
+    if (viewer.isIsolated(ref)) {
+      showEverything();
+      return;
+    }
+    viewer.isolate(ref);
+    refreshVisibilityState();
+  });
+  propIsolate = { button, ref, title };
+  paintIsolateButton(propIsolate);
+  return button;
+}
+
+function paintIsolateButton({ button, ref, title }: NonNullable<typeof propIsolate>): void {
+  const isolated = viewer?.isIsolated(ref) ?? false;
+  button.textContent = isolated ? 'Show all' : 'Isolate';
+  button.title = isolated ? 'Show everything hidden, in every model and the scene' : title;
 }
 
 /**
@@ -5832,23 +6098,6 @@ function buildSceneRootPanel(): HTMLElement {
     row.append(key, button);
     panel.append(row);
   });
-
-  const actions = document.createElement('div');
-  actions.className = 'Row';
-  const spacer = document.createElement('span');
-  spacer.className = 'Label';
-  const buttons = document.createElement('span');
-  buttons.className = 'Buttons';
-  const frame = document.createElement('button');
-  frame.type = 'button';
-  frame.className = 'Button';
-  frame.textContent = 'Frame';
-  frame.title = 'Frame everything (F)';
-  frame.disabled = viewer === null;
-  frame.addEventListener('click', () => viewer?.frameAll());
-  buttons.append(frame);
-  actions.append(spacer, buttons);
-  panel.append(actions);
 
   const note = document.createElement('p');
   note.className = 'note';
@@ -7045,6 +7294,20 @@ function openTextureDialog(model: Model, materialIndex: number, spec: MapSlotSpe
   const rotationRow = fieldRow('Rotation °', rotation);
   rotationRow.title = 'In degrees, about the centre. KHR_texture_transform.rotation';
 
+  const flipY = document.createElement('input');
+  flipY.type = 'checkbox';
+  flipY.checked = uv.flipY;
+  flipY.setAttribute('aria-label', 'Flip Y');
+  flipY.addEventListener('change', () => {
+    uv.flipY = flipY.checked;
+    setUv();
+  });
+  const flipYRow = fieldRow('Flip Y', flipY);
+  flipYRow.title =
+    'Turns the image upside down on this map. glTF has no flipY — GLTFLoader always sets it false — so it is ' +
+    'stored as the transform that does it (scale.y negated, offset.y to 1 − y), and kept in the transform’s ' +
+    'extras.flipY for this dialog.';
+
   const premultiply = document.createElement('input');
   premultiply.type = 'checkbox';
   premultiply.disabled = true;
@@ -7109,6 +7372,7 @@ function openTextureDialog(model: Model, materialIndex: number, spec: MapSlotSpe
         0.01,
       ),
       rotationRow,
+      flipYRow,
     ),
     section(
       'Color',
@@ -7299,8 +7563,8 @@ function imagePixels(image: HTMLImageElement, longest: number): ImageData | null
 
 /**
  * Samples the texture across the unit square the way three.js does: its UV
- * transform (Matrix3.setUvTransform), then the sampler's wrap, then its
- * magnification filter. Minification and anisotropy are left to the viewport.
+ * transform (Matrix3.setUvTransform) and flip, then the sampler's wrap, then
+ * its magnification filter. Minification and anisotropy are left to the viewport.
  */
 function paintTexturePreview(
   canvas: HTMLCanvasElement,
@@ -7321,9 +7585,15 @@ function paintTexturePreview(
   const m00 = sx * cos;
   const m01 = sx * sin;
   const m02 = -sx * (cos * cx + sin * cy) + cx + ox;
-  const m10 = -sy * sin;
-  const m11 = sy * cos;
-  const m12 = -sy * (-sin * cx + cos * cy) + cy + oy;
+  let m10 = -sy * sin;
+  let m11 = sy * cos;
+  let m12 = -sy * (-sin * cx + cos * cy) + cy + oy;
+  // V read from the other edge, as the stored transform has it.
+  if (uv.flipY) {
+    m10 = -m10;
+    m11 = -m11;
+    m12 = 1 - m12;
+  }
   const linear = sampler.magFilter === LINEAR;
 
   let at = 0;
@@ -7539,6 +7809,13 @@ function isolateSelection(): void {
   refreshVisibilityState();
 }
 
+/** Show all, from the toolbar, the View menu or the panel: whatever is hidden comes back. */
+function showEverything(): void {
+  if (!viewer) return;
+  viewer.showAll();
+  refreshVisibilityState();
+}
+
 function frameSelection(): void {
   if (!viewer) return;
   if (extraPicks.length > 0) viewer.frameMany(...splitPicks(allPicks()));
@@ -7685,13 +7962,195 @@ function followRenumbering(
   return next;
 }
 
-/** A selection in the numbering of its file as opened, before any delete. */
+/**
+ * A selection in the numbering of its file as opened, before any delete. A
+ * pasted object or mesh data was never in the file, and drops out.
+ */
 function inFileNumbering(model: Model, ref: SelectionRef): SelectionRef {
   const numbered: SelectionRef = { ...ref };
   const { origins } = model;
   if (ref.node !== undefined) numbered.node = origins.nodes?.[ref.node] ?? ref.node;
   if (ref.mesh !== undefined) numbered.mesh = origins.meshes?.[ref.mesh] ?? ref.mesh;
+  if (numbered.node === -1) delete numbered.node;
+  if (numbered.mesh === -1) delete numbered.mesh;
   return numbered;
+}
+
+// ---------------------------------------------------------------------------
+// Copy & paste
+//
+// Ctrl+C copies what is selected, and Ctrl+V pastes it beside what is selected
+// then. The scene's own objects paste into the scene — whichever is on show.
+// Objects out of a file paste back into that same file: their mesh data is in
+// its binary data, which no other file can point at. A copy is a snapshot (see
+// paste.ts), so copy, delete and paste moves an object to another parent.
+
+/** Copies what is selected: objects with everything under them, out of the models and the scene. */
+function copySelection(): void {
+  const [refs, objectIds] = splitPicks(allPicks());
+  if (refs.length === 0 && objectIds.length === 0) {
+    showFlash('Nothing selected to copy');
+    return;
+  }
+
+  const byModel = new Map<Model, number[]>();
+  let skipped = 0;
+  for (const ref of refs) {
+    const model = modelById(ref.model);
+    if (!model) continue;
+    if (ref.node === undefined) skipped++;
+    else byModel.set(model, [...(byModel.get(model) ?? []), ref.node]);
+  }
+  const clips = new Map<number, NodeClip>();
+  for (const [model, nodes] of byModel) {
+    const clip = copyNodes(model.json, nodes);
+    if (clip) clips.set(model.id, clip);
+  }
+  const { objects, roots } = copySceneObjects(objectIds);
+
+  const nodeRoots = [...clips.values()].reduce((sum, clip) => sum + clip.roots.length, 0);
+  const count = nodeRoots + roots;
+  if (count === 0) {
+    showFlash(skipped > 0 ? 'Only objects can be copied' : 'Nothing selected to copy');
+    return;
+  }
+  clipboard = { objects, models: clips };
+  updateMenus();
+  const left = skipped > 0 ? ` (${plural(skipped, 'thing')} left: only objects can be copied)` : '';
+  showFlash(`Copied ${plural(count, 'object')}${left} — Ctrl+V to paste`);
+}
+
+/**
+ * Copies scene objects with whatever hangs off them. One picked along with
+ * something above it comes along under that anyway; `roots` counts the rest.
+ */
+function copySceneObjects(ids: number[]): { objects: SceneObject[]; roots: number } {
+  const picked = new Set(ids.filter((id) => objectById(id) !== undefined));
+  const below = new Set<number>();
+  for (const id of picked) {
+    for (const under of descendantsOf(sceneObjects, id)) below.add(under);
+  }
+  const roots = [...picked].filter((id) => !below.has(id)).length;
+  const objects = sceneObjects
+    .filter((object) => picked.has(object.id) || below.has(object.id))
+    .map((object) => structuredClone(object));
+  return { objects, roots };
+}
+
+/**
+ * Pastes what was copied, and selects the copies. Each goes beside what is
+ * selected — as its sibling, right after it — when that is in the same file,
+ * or for the scene's own objects one of those; otherwise it goes back under
+ * whatever its original hung off. Ctrl+Z takes all of it back in one go.
+ */
+function pasteClipboard(): void {
+  if (!clipboard) {
+    showFlash('Nothing to paste — Ctrl+C copies what is selected');
+    return;
+  }
+  // Opened before the selection moves to the copies, so that undoing selects again what was.
+  beginHistoryStep();
+  const pasted: SelectionItem[] = [];
+  const notes: string[] = [];
+
+  if (clipboard.objects.length > 0) {
+    const opening = models.length === 0 && !sceneStarted;
+    pasted.push(...pasteSceneObjects(clipboard.objects));
+    viewer?.syncObjects(sceneObjects);
+    noteSceneEdit();
+    if (opening) {
+      showScene();
+      setTab('scene');
+    }
+  }
+
+  const changed: Model[] = [];
+  let closed = 0;
+  for (const [id, clip] of clipboard.models) {
+    const model = modelById(id);
+    if (!model) {
+      closed += clip.roots.length;
+      continue;
+    }
+    const beside = selection?.model === id && selection.node !== undefined ? selection.node : null;
+    const result = pasteNodes(model.json, clip, model.sceneIndex, beside);
+    if ('blocked' in result) {
+      const name = getName(result.blocked.node);
+      notes.push(
+        `${name ? `"${name}"` : 'an object'} not pasted: the bones it is skinned to have changed since — copy it with them`,
+      );
+      continue;
+    }
+    markPasted(model, result.added);
+    model.pastedCount += result.added.nodes;
+    pasted.push(...result.roots.map((node) => ({ ref: { model: id, node } })));
+    changed.push(model);
+  }
+  if (closed > 0) notes.push(`${plural(closed, 'object')} not pasted: the file it came from is not open`);
+
+  if (pasted.length > 0) {
+    buildEditor();
+    selectPicks(pasted[0], pasted.slice(1), { scroll: true });
+    for (const model of changed) {
+      noteEdit(model);
+      void startViewer(model, { keepView: true });
+    }
+  }
+  const done = pasted.length > 0 ? `Pasted ${plural(pasted.length, 'object')} — Ctrl+Z to undo` : 'Nothing pasted';
+  showFlash([done, ...notes].join('; '));
+}
+
+/**
+ * The scene's own objects back in the scene, under ids and names of their own.
+ * Returns picks for the copies of the ones that were copied.
+ */
+function pasteSceneObjects(copied: SceneObject[]): SelectionItem[] {
+  const picked = objectById(pickedObject);
+  const ids = new Map<number, number>();
+  let next = nextObjectId();
+  for (const object of copied) ids.set(object.id, next++);
+
+  const roots: SelectionItem[] = [];
+  for (const source of copied) {
+    const copy = structuredClone(source);
+    copy.id = ids.get(source.id)!;
+    const under = source.parent === null ? undefined : ids.get(source.parent);
+    if (under !== undefined) {
+      copy.parent = under;
+    } else {
+      copy.parent = picked ? picked.parent : objectById(source.parent) ? source.parent : null;
+      roots.push({ object: copy.id });
+    }
+    // Box 2 copies as Box 3, not Box 2 2.
+    if (source.name) copy.name = uniqueObjectName(source.name.replace(/ \d+$/, '') || source.name);
+    sceneObjects.push(copy);
+  }
+  return roots;
+}
+
+/**
+ * What a paste added is nothing the file had, so a restored session, an undo or
+ * a reset must not pair it with whichever of the file's own entries sat at its
+ * index. Pasting only appends, so it is the end of each list.
+ */
+function markPasted(model: Model, added: Pasted['added']): void {
+  const origins: Origins = { ...model.origins };
+  for (const [key, count] of [
+    ['nodes', added.nodes],
+    ['meshes', added.meshes],
+    ['skins', added.skins],
+  ] as const) {
+    if (count === 0) continue;
+    const before = (model.json[key]?.length ?? 0) - count;
+    const from = origins[key] ?? Array.from({ length: before }, (_, index) => index);
+    origins[key] = [...from.slice(0, before), ...new Array<number>(count).fill(-1)];
+  }
+  model.origins = origins;
+}
+
+/** Whether anything selected is an object Copy can take. */
+function canCopy(): boolean {
+  return allPicks().some((pick) => pick.object !== undefined || pick.ref.node !== undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -7854,7 +8313,7 @@ function buildMorphPanel(model: Model, entries: MorphEntry[]): HTMLElement {
     const first = entry.nodes[0];
     const kind: TargetKind = first === undefined ? 'mesh' : 'node';
     const index = first ?? entry.mesh;
-    const name = getName(entryFor(model, kind, index) ?? {}) || `${kind === 'node' ? 'Node' : 'Mesh'} ${index}`;
+    const name = targetName(model, kind, index) || `${kind === 'node' ? 'Node' : 'Mesh'} ${index}`;
     const others = entry.nodes.length - 1;
 
     const select = document.createElement('button');
@@ -8374,8 +8833,8 @@ function nameRow(
 
   if (entry) {
     const original = rowsByEntry.get(entry)?.[0]?.original ?? keptOriginal(entry)?.name ?? getName(entry);
-    input.value = getName(entry);
-    input.classList.toggle('modified', input.value !== original);
+    paintFieldName(model, entry, input);
+    input.classList.toggle('modified', getName(entry) !== original);
     input.addEventListener('input', () => applyNameEdit(model, entry, input));
     input.addEventListener('blur', () => settleNameEdit(model, entry, input));
     fields.push({ model, entry, input, original });
@@ -8449,7 +8908,7 @@ function linkRow(model: Model, label: string, kind: TargetKind, index: number): 
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'Button';
-  button.textContent = getName(entryFor(model, kind, index) ?? {}) || `${kind} ${index}`;
+  button.textContent = targetName(model, kind, index) || `${kind} ${index}`;
   button.addEventListener('click', () => {
     // Set first: the panel keeps the tab when the new selection still has it.
     propTab = kind;
@@ -8655,6 +9114,7 @@ function refreshVisibilityState(): void {
     propObject.visible.disabled = false;
   }
   showAllBtn.hidden = !viewer.anyHidden();
+  if (propIsolate) paintIsolateButton(propIsolate);
   updateMenus();
 }
 
@@ -8670,7 +9130,7 @@ function describeTarget(model: Model, kind: TargetKind, index: number | undefine
   if (index === undefined) return 'something above it';
   // From the document, not from a row: an object's row stands in for its mesh
   // data as well, and its name is the object's.
-  const name = getName(entryFor(model, kind, index) ?? {});
+  const name = targetName(model, kind, index);
   return name ? `${kind} "${name}"` : `${kind} ${index}`;
 }
 
@@ -8773,20 +9233,23 @@ function updateMenus(): void {
   for (const action of ['download', 'reset', 'reset-all', 'close', 'find']) {
     setOptionInactive(action, !open);
   }
-  // A scene of its own has an outliner to filter and fold, and is put away with the models.
-  for (const action of ['close-all', 'collapse', 'filter']) {
+  // A scene of its own has an outliner to filter and fold, is put away with the
+  // models, and is something to send to the studio.
+  for (const action of ['close-all', 'collapse', 'filter', 'export-scene']) {
     setOptionInactive(action, !open && !sceneStarted);
   }
   setOptionInactive('undo', !canUndo());
   setOptionInactive('redo', history.redo.length === 0);
   setOptionInactive('delete-scene', sceneList.length <= 1);
+  setOptionInactive('copy', !canCopy());
+  setOptionInactive('paste', clipboard === null);
   setOptionInactive('delete', !canDelete(selection) && pickedObject === null);
-  setOptionInactive('frame', viewer === null);
   setOptionInactive('isolate', viewer === null || (selection === null && pickedObject === null));
   setOptionInactive('show-all', viewer === null || !viewer.anyHidden());
 
   const grid = menuOption('grid');
   grid?.classList.toggle('toggle-on', gridVisible);
+  for (const value of SHADINGS) menuOption(`shading-${value}`)?.classList.toggle('toggle-on', shading === value);
 
   menuOption('gizmo')?.classList.toggle('toggle-on', gizmoEnabled);
   menuOption('space')?.classList.toggle('toggle-on', gizmoSpace === 'local');
@@ -8817,6 +9280,11 @@ function runMenuAction(action: string | undefined): void {
     addSceneObject(kind);
     return;
   }
+  const shaded = action?.replace(/^shading-/, '');
+  if (action !== shaded && isShading(shaded)) {
+    setShading(shaded);
+    return;
+  }
   switch (action) {
     case 'open':
       fileInput.click();
@@ -8826,6 +9294,9 @@ function runMenuAction(action: string | undefined): void {
     // ___main.json; this is the same picker, under the name to look for it by.
     case 'import-scene':
       folderInput.click();
+      break;
+    case 'export-scene':
+      void exportStudioScene();
       break;
     case 'download':
       void exportModel();
@@ -8858,6 +9329,12 @@ function runMenuAction(action: string | undefined): void {
     case 'redo':
       redo();
       break;
+    case 'copy':
+      copySelection();
+      break;
+    case 'paste':
+      pasteClipboard();
+      break;
     case 'delete':
       deleteSelection();
       break;
@@ -8887,15 +9364,11 @@ function runMenuAction(action: string | undefined): void {
     case 'mode-scale':
       setGizmoMode('scale');
       break;
-    case 'frame':
-      viewer?.frameAll();
-      break;
     case 'isolate':
       isolateSelection();
       break;
     case 'show-all':
-      viewer?.showAll();
-      refreshVisibilityState();
+      showEverything();
       break;
     case 'play':
       togglePlayback();
@@ -8919,6 +9392,8 @@ function runMenuAction(action: string | undefined): void {
 // Keyboard navigation
 
 const TREE_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+/** The viewport's letters: F frames, W/E/R switch the gizmo. */
+const VIEW_KEYS = new Set(['f', 'w', 'e', 'r']);
 
 /** Fields whose text is no part of any document, and so undo their own typing. */
 function ownsTextUndo(element: Element | null): boolean {
@@ -8938,6 +9413,15 @@ function isTextEntry(element: Element | null): boolean {
     element instanceof HTMLSelectElement ||
     (element instanceof HTMLElement && element.isContentEditable)
   );
+}
+
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'number', 'email', 'url', 'tel', 'password']);
+
+/** A field text can be typed into now — not a name that is only picked, nor a checkbox. */
+function takesText(element: Element | null): boolean {
+  if (element instanceof HTMLTextAreaElement) return !element.readOnly;
+  if (element instanceof HTMLInputElement) return !element.readOnly && TEXT_INPUT_TYPES.has(element.type);
+  return element instanceof HTMLElement && element.isContentEditable;
 }
 
 /** The name field of a row, if that is what has focus. */
@@ -9284,7 +9768,7 @@ sidebar.addEventListener('click', (event) => {
 
   switch (button.dataset.action) {
     case 'revert':
-      setEntryName(row.entry, row.original);
+      setEntryName(row.model, row.entry, row.original);
       noteEdit(row.model);
       break;
     case 'toggle-visibility':
@@ -9372,6 +9856,9 @@ sidebar.addEventListener('keydown', (event) => {
       deleteRow(rowPositionOf(input));
       return;
     }
+    // F and W/E/R are the viewport's, even here: a row is where the keyboard is
+    // after clicking one, and that is when framing it is wanted.
+    if (viewer && VIEW_KEYS.has(event.key.toLowerCase())) return;
     // Typing on a selected row means renaming it: opening the field before the
     // key's own default runs lets the character land in the (fully selected)
     // name, replacing it.
@@ -9556,7 +10043,6 @@ for (const { select } of modelPickers) {
   });
 }
 
-frameBtn.addEventListener('click', () => viewer?.frameAll());
 isolateBtn.addEventListener('click', isolateSelection);
 
 // The outliner's "+": a dropdown of what can be added to the scene. It opens
@@ -9597,11 +10083,13 @@ document.addEventListener('pointerdown', (event) => {
 // It is placed beside the button once, so anything that moves the button puts it away.
 window.addEventListener('resize', closeAddMenu);
 sidebar.addEventListener('scroll', closeAddMenu);
-showAllBtn.addEventListener('click', () => {
-  viewer?.showAll();
-  refreshVisibilityState();
-});
+showAllBtn.addEventListener('click', showEverything);
 gridBtn.addEventListener('click', () => setGridVisible(!gridVisible));
+shadingSelect.addEventListener('change', () => {
+  if (isShading(shadingSelect.value)) setShading(shadingSelect.value);
+  // A dropdown keeps the keyboard, and with it F, W, E and R; the viewport wants them back.
+  shadingSelect.blur();
+});
 
 for (const [mode, button] of Object.entries(gizmoButtons) as [GizmoMode, HTMLButtonElement][]) {
   button.addEventListener('click', () => {
@@ -9719,6 +10207,16 @@ document.addEventListener('keydown', (event) => {
     else undo();
     return;
   }
+  // Ctrl+C and Ctrl+V copy and paste objects, as in the editor. A field being
+  // typed in keeps them for its text, and so does text selected on the page.
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (key === 'c' || key === 'v')) {
+    if (takesText(target)) return;
+    if (key === 'c' && (window.getSelection()?.toString() ?? '') !== '') return;
+    event.preventDefault();
+    if (key === 'c') copySelection();
+    else pasteClipboard();
+    return;
+  }
   if (event.key === 'Escape') {
     closeMenus();
     closeAddMenu();
@@ -9736,7 +10234,22 @@ document.addEventListener('keydown', (event) => {
       return;
     }
   }
-  if (editing || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+
+  // F frames the selection, and W/E/R switch the gizmo, as they do in the
+  // three.js editor — from a name that is only picked too, which is where the
+  // keyboard is after clicking a row.
+  if (key === 'f' && viewer) {
+    frameSelection();
+    return;
+  }
+  const mode = { w: 'translate', e: 'rotate', r: 'scale' }[key];
+  if (mode && viewer) {
+    if (!gizmoEnabled) setGizmoEnabled(true);
+    setGizmoMode(mode as GizmoMode);
+    return;
+  }
+  if (editing) return;
 
   // Delete takes the selection out of the file, as it does in the three.js
   // editor. The outliner and the Files tab handle it for the row they are on.
@@ -9745,19 +10258,6 @@ document.addEventListener('keydown', (event) => {
       event.preventDefault();
       deleteSelection();
     }
-    return;
-  }
-
-  if (event.key.toLowerCase() === 'f' && viewer) {
-    frameSelection();
-    return;
-  }
-
-  // W/E/R switch the gizmo, as they do in the three.js editor.
-  const mode = { w: 'translate', e: 'rotate', r: 'scale' }[event.key.toLowerCase()];
-  if (mode && viewer) {
-    if (!gizmoEnabled) setGizmoEnabled(true);
-    setGizmoMode(mode as GizmoMode);
   }
 });
 
@@ -9778,7 +10278,7 @@ window.addEventListener('beforeunload', (event) => {
   }
   for (const entryRows of rowsByEntry.values()) {
     if (!unkept.includes(entryRows[0].model)) continue;
-    if (entryRows[0].input.value !== entryRows[0].original) {
+    if (getName(entryRows[0].entry) !== entryRows[0].original) {
       event.preventDefault();
       return;
     }
